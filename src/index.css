@@ -43,6 +43,12 @@
   }
 }
 
+::selection {
+  background: transparent;
+  text-decoration: underline;
+  text-decoration-color: red;
+}
+
 * {
   border-color: var(--color-border);
 }
@@ -83,6 +89,8 @@ body {
 }
 
 .pdf-text-layer span::selection {
-  background: rgba(59, 130, 246, 0.3);
+  background: transparent;
   color: transparent;
+  text-decoration: underline;
+  text-decoration-color: red;
 }
