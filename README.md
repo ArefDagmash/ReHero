@@ -26,6 +26,7 @@ npm run tauri build    # Production binary + deb/rpm bundles
 | Styling        | Tailwind CSS v4 + shadcn/ui (new-york)  |
 | State          | Zustand v5 (persist middleware)         |
 | PDF rendering  | pdfjs-dist v4                           |
+| Rough lines    | roughjs v4                               |
 | Animations     | framer-motion v11                       |
 | Icons          | lucide-react                            |
 | Logging        | Custom timestamped console logger       |
@@ -81,22 +82,29 @@ ResearchReader/
 
 ## UI Layout
 
-Three-column layout, full viewport height, no shell scrollbars.
+Minimal full-viewport reader. No toolbar — controls float over the PDF.
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│ Toolbar (h-12)          [nav] [zoom] [toggles]               │
-├──────────┬───────────────────────────────────┬────────────────┤
-│ Library  │         Reader (flex-1)           │ AnnotationPanel│
-│ w-60     │   PDF canvas, text layer,         │ w-80           │
-│ collaps  │   page transitions (framer),      │ collaps        │
-│          │   loading skeleton                │                │
-└──────────┴───────────────────────────────────┴────────────────┘
+│ [🎨 theme]                          [− 100% +]  zoom        │
+│                                                              │
+│ ◀                                                    ▶      │
+│                                                              │
+│ Library  │         Reader (flex-1)                          │
+│ w-72     │   PDF canvas, text layer,                        │
+│ toggl'd  │   page transitions (framer),                     │
+│          │   doodly selection overlay                       │
+│                                                              │
+│                      [clean|medium|sloppy]  sloppiness       │
+│  ☰ library                                                 │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-- Left sidebar: 240px, collapsible
+- Left sidebar: 288px, toggled via floating button (bottom-left)
 - Center: flex-1, scrollable PDF viewer
-- Right sidebar: 300px, collapsible
+- Floating controls: page arrows (left/right edges), zoom (top-right), theme picker (top-left)
+- Sloppiness picker: fixed bottom-center (visible when a paper is open)
+- Keyboard: ArrowLeft/ArrowRight for page navigation
 
 ---
 
@@ -105,11 +113,14 @@ Three-column layout, full viewport height, no shell scrollbars.
 ### PDF Reader (`Reader.tsx`)
 
 - Renders PDFs page-by-page using pdfjs-dist v4
-- **Text layer** for native text selection (invisible until selected, `color: transparent`)
+- **Text layer** for native text selection (invisible, `color: transparent`)
+- **Doodly selection**: Rough.js hand-drawn red underlines appear under selected text in real-time via `selectionchange` event
+- **Sloppiness control**: 3-level toggle (clean / medium / sloppy) adjusts Rough.js roughness and bowing
+- Selection underlines draw live as you drag; rects merged per visual line to avoid stacking
 - **HiDPI rendering**: canvas internal resolution = CSS size × `devicePixelRatio` for sharp output
 - Canvas and text layer share the exact same CSS dimensions for guaranteed alignment at all zoom levels
-- **Zoom**: 50%–300% in 25% increments
-- **Page transitions**: 150ms opacity fade via framer-motion (only on page change, not zoom)
+- **Zoom**: 50%–300% in 25% increments (floating +/- controls, top-right)
+- **Page transitions**: 200ms opacity crossfade via framer-motion `AnimatePresence mode="sync"`
 - **Loading states**: Document-load skeleton (full page placeholder) and page-load skeleton (overlay)
 - **30-second timeout**: Shows error if PDF load hangs instead of loading forever
 - **Stale load protection**: `activeLoadKeyRef` prevents race conditions when switching papers rapidly
@@ -118,24 +129,27 @@ Three-column layout, full viewport height, no shell scrollbars.
 - **Tauri mode**: Loads PDFs from disk via `@tauri-apps/plugin-fs`
 - Drop shadow on the page canvas for depth
 
-### Text Layer Styling (`.pdf-text-layer`)
+### Text Layer & Selection (`index.css` + `Reader.tsx`)
 
 - Text layer spans are `color: transparent` — invisible by default
-- Selection highlight: light blue background (`rgba(100, 160, 255, 0.25)`)
+- `::selection { background: transparent; color: transparent; }` suppresses browser selection highlighting completely
+- Doodly underlines rendered via Rough.js SVG overlay (gets `getClientRects()` per-selection-line, merges overlapping rects, draws rough paths)
 - `line-height: 1` on spans to keep selection highlights tight to the text
 - `overflow: hidden` to clip text beyond page boundaries
 - `<br>` elements hidden to prevent extra gaps
 
-### Toolbar (`Toolbar.tsx`)
+### Floating Controls (in `Reader.tsx`)
 
-| Section    | Controls                                            |
-| ---------- | --------------------------------------------------- |
-| Left       | Hamburger — toggle Library sidebar                  |
-| Center     | Page back/forward arrows + page indicator           |
-| Right      | Zoom out/in + percentage label                      |
-| Far right  | Toggle AnnotationPanel sidebar                      |
+| Location     | Controls                                              |
+| ------------ | ----------------------------------------------------- |
+| Left edge    | ◀ Previous page (disabled at page 1)                  |
+| Right edge   | Next page ▶ (disabled at last page)                   |
+| Top-right    | − Zoom out / + Zoom in / percentage label             |
+| Top-left     | 🎨 Theme picker — click to expand, 3 colored swatches |
+| Bottom-left  | ☰ Toggle Library sidebar (in `App.tsx`, fixed)       |
+| Bottom-center| clean / medium / sloppy — Rough.js sloppiness toggle  |
 
-All buttons use `ghost` variant, icon size.
+All floating controls use `backdrop-blur-sm` translucent backgrounds with border. Theme picker expands with framer-motion animation to show dark/sepia/light color swatches.
 
 ### Library (`Library.tsx`)
 
@@ -211,6 +225,7 @@ All logs go to the browser console with structured data payloads.
 | `activePaperPath`      | `string \| null`                | Yes       | `null`     |
 | `currentPage`          | `number`                        | Yes       | `1`        |
 | `zoom`                 | `number`                        | Yes       | `1.0`      |
+| `bgTheme`              | `"dark" \| "sepia" \| "light"`  | Yes       | `"dark"`   |
 | `annotations`          | `Record<string, Annotation[]>`  | No*       | `{}`       |
 | `highlightMenuVisible` | `boolean`                       | No        | `false`    |
 | `highlightText`        | `string`                        | No        | `""`       |
@@ -227,6 +242,7 @@ All logs go to the browser console with structured data payloads.
 | `setActivePaper`        | `(path: string \| null) => void`                          | Resumes at lastPage if available         |
 | `setPage`               | `(page: number) => void`                                  |                                          |
 | `setZoom`               | `(zoom: number) => void`                                  |                                          |
+| `setBgTheme`            | `(theme: "dark" \| "sepia" \| "light") => void`            | Persisted, updates `html[data-theme]`    |
 | `updatePaperLastPage`   | `(path: string, lastPage: number) => void`                | Bookmark tracking                        |
 | `updatePaperTotalPages` | `(path: string, totalPages: number) => void`              | Set when PDF loads                       |
 | `addAnnotation`         | `(filePath: string, annotation: Annotation) => void`      | Saves to localStorage                    |
@@ -263,11 +279,25 @@ type ChatMessage = {
 
 ---
 
-## Theme — shadcn/ui (new-york, neutral, dark only)
+## Theme
 
-All colors are CSS custom properties defined via Tailwind v4 `@theme inline`.
+### Theme Presets
 
-Base color: **neutral** (grayscale HSL palette). Dark mode only — background is near-black (`hsl(0 0% 3.9%)`), text near-white (`hsl(0 0% 98%)`). No light mode, no theme toggle.
+Three presets cycled via the top-left palette button. Stored in Zustand (`bgTheme`), applied via `html[data-theme]` CSS custom property overrides.
+
+| Theme | Background             | Text / Chrome        |
+| ----- | ---------------------- | -------------------- |
+| dark  | `hsl(0 0% 3.9%)`      | Near-white / gray    |
+| sepia | `hsl(40 30% 92%)`     | Warm browns          |
+| light | `hsl(0 0% 100%)`      | Near-black / light gray |
+
+All colors are CSS custom properties defined via Tailwind v4 `@theme` (not inline — utilities use `var()` references for dynamic theming).
+
+### Typography
+
+- **Sans-serif**: Excalifont (custom woff2 loaded via `@font-face`)
+- **Monospace**: Geist Mono
+- Font file: `public/fonts/Excalifont-Regular.woff2`
 
 ### UI Components — Variants
 
@@ -362,8 +392,8 @@ tauri::Builder::default()
 
 - Google Photos integration
 - TTS / voice narration
-- Book mode vs paper mode toggle
 - Cloud sync
 - Full-text search
 - Tag management
-- Light mode / theme toggle
+- Annotation panel re-integration into the minimal UI
+- Book mode vs paper mode toggle
