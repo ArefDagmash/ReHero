@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import * as pdfjsLib from "pdfjs-dist";
 import pdfjsWorker from "pdfjs-dist/build/pdf.worker.mjs?url";
 import { motion, AnimatePresence } from "framer-motion";
+import rough from "roughjs";
 import { useAppStore } from "@/store/useAppStore";
 import { log } from "@/lib/logger";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -58,12 +59,16 @@ function Reader() {
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const textLayerRef = useRef<HTMLDivElement>(null);
+  const pageRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [pdfDoc, setPdfDoc] = useState<pdfjsLib.PDFDocumentProxy | null>(null);
   const [pageLoading, setPageLoading] = useState(false);
   const [docLoading, setDocLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [skeletonDimensions, setSkeletonDimensions] = useState<{ width: number; height: number } | null>(null);
+  const [doodleRects, setDoodleRects] = useState<{ x: number; y: number; w: number; h: number }[]>([]);
+  const [sloppiness, setSloppiness] = useState<"clean" | "medium" | "sloppy">("clean");
+  const doodleSvgRef = useRef<SVGSVGElement>(null);
   const renderTaskRef = useRef<pdfjsLib.RenderTask | null>(null);
   const activeLoadKeyRef = useRef<string | null>(null);
 
@@ -208,22 +213,93 @@ function Reader() {
 
   useEffect(() => {
     renderPage(currentPage);
+    setDoodleRects([]);
   }, [currentPage, zoom, renderPage]);
+
+  useEffect(() => {
+    const svg = doodleSvgRef.current;
+    if (!svg) return;
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    if (doodleRects.length === 0) return;
+
+    const slop: Record<string, { roughness: number; bowing: number }> = {
+      clean: { roughness: 1.0, bowing: 0.2 },
+      medium: { roughness: 1.5, bowing: 0.6 },
+      sloppy: { roughness: 2.0, bowing: 1.0 },
+    };
+    const s = slop[sloppiness];
+
+    const rc = rough.svg(svg);
+    for (const r of doodleRects) {
+      const y = r.y + r.h - 1;
+      svg.appendChild(
+        rc.line(r.x, y, r.x + r.w, y, {
+          stroke: "red",
+          strokeWidth: 2,
+          roughness: s.roughness,
+          bowing: s.bowing,
+        }),
+      );
+    }
+  }, [doodleRects, sloppiness]);
+
+  const handleMouseDown = useCallback(() => {
+    setDoodleRects([]);
+  }, []);
+
+  const updateDoodles = useCallback(() => {
+    const selection = window.getSelection();
+    if (!selection || selection.toString().trim().length === 0) {
+      setDoodleRects([]);
+      return;
+    }
+    const rects = Array.from(selection.getRangeAt(0).getClientRects());
+    const page = pageRef.current;
+    if (!page) return;
+
+    const pageRect = page.getBoundingClientRect();
+
+    // Merge rects on the same visual line to avoid double-stacking
+    const merged: { x: number; y: number; w: number; h: number }[] = [];
+    const sorted = rects
+      .map((r) => ({ x: r.x - pageRect.x, y: r.y - pageRect.y, w: r.width, h: r.height }))
+      .sort((a, b) => a.y - b.y || a.x - b.x);
+
+    for (const r of sorted) {
+      const last = merged[merged.length - 1];
+      const rMid = r.y + r.h / 2;
+      const lastMid = last ? last.y + last.h / 2 : Infinity;
+      if (last && Math.abs(rMid - lastMid) < 5) {
+        // Same line — extend the last rect
+        last.w = Math.max(last.x + last.w, r.x + r.w) - last.x;
+      } else {
+        merged.push({ ...r });
+      }
+    }
+
+    setDoodleRects(merged);
+  }, []);
+
+  useEffect(() => {
+    document.addEventListener("selectionchange", updateDoodles);
+    return () => document.removeEventListener("selectionchange", updateDoodles);
+  }, [updateDoodles]);
 
   const handleMouseUp = useCallback(() => {
     const selection = window.getSelection();
-    if (selection && selection.toString().trim().length > 0) {
-      const text = selection.toString().trim();
-      const rect = selection.getRangeAt(0).getBoundingClientRect();
-      useAppStore.setState({
-        highlightMenuVisible: true,
-        highlightText: text,
-        highlightRect: {
-          x: rect.left + rect.width / 2,
-          y: rect.top,
-        },
-      });
-    }
+    if (!selection || selection.toString().trim().length === 0) return;
+
+    const text = selection.toString().trim();
+    const rects = selection.getRangeAt(0).getClientRects();
+    const firstRect = rects[0];
+    useAppStore.setState({
+      highlightMenuVisible: true,
+      highlightText: text,
+      highlightRect: {
+        x: firstRect.left + firstRect.width / 2,
+        y: firstRect.top,
+      },
+    });
   }, []);
 
   if (!activePaperPath) {
@@ -254,6 +330,7 @@ function Reader() {
     <div
       ref={containerRef}
       className="flex-1 overflow-auto bg-background"
+      onMouseDown={handleMouseDown}
       onMouseUp={handleMouseUp}
     >
       {error && !pdfDoc && (
@@ -300,6 +377,7 @@ function Reader() {
                 </div>
               )}
               <div
+                ref={pageRef}
                 className="relative inline-block"
                 style={{
                   width: `${skeletonDimensions?.width || 600}px`,
@@ -308,9 +386,37 @@ function Reader() {
               >
                 <canvas ref={canvasRef} className="block" />
                 <div ref={textLayerRef} className="pdf-text-layer" />
+                {doodleRects.length > 0 && (
+                  <svg
+                    ref={doodleSvgRef}
+                    className="absolute inset-0 pointer-events-none"
+                    style={{ overflow: "visible", width: "100%", height: "100%" }}
+                  />
+                )}
               </div>
             </motion.div>
           </AnimatePresence>
+        </div>
+      )}
+
+      {activePaperPath && (
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-30 flex items-center gap-1 bg-background/80 border border-border rounded-full px-2 py-1 backdrop-blur-sm">
+          {(["clean", "medium", "sloppy"] as const).map((level) => (
+            <button
+              key={level}
+              onClick={(e) => {
+                e.stopPropagation();
+                setSloppiness(level);
+              }}
+              className={`px-2.5 py-0.5 rounded-full text-xs transition-colors ${
+                sloppiness === level
+                  ? "bg-primary text-primary-foreground"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {level}
+            </button>
+          ))}
         </div>
       )}
     </div>
