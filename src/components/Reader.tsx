@@ -230,7 +230,6 @@ function Reader() {
   );
 
   useEffect(() => {
-  useEffect(() => {
     if (pdfDoc) renderPage(currentPage);
   }, [zoom]);
 
