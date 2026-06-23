@@ -27,17 +27,21 @@ function saveAnnotations(data: Record<string, Annotation[]>) {
   }
 }
 
+type BgTheme = "dark" | "sepia" | "light";
+
 type AppState = {
   papers: Paper[];
   activePaperPath: string | null;
   currentPage: number;
   zoom: number;
+  bgTheme: BgTheme;
   annotations: Record<string, Annotation[]>;
 
   highlightMenuVisible: boolean;
   highlightText: string;
   highlightRect: { x: number; y: number } | null;
 
+  setBgTheme: (theme: BgTheme) => void;
   addPaper: (paper: Paper) => void;
   setActivePaper: (path: string | null) => void;
   setPage: (page: number) => void;
@@ -57,6 +61,7 @@ export const useAppStore = create<AppState>()(
       activePaperPath: null,
       currentPage: 1,
       zoom: 1.0,
+      bgTheme: "dark",
       annotations: {},
       highlightMenuVisible: false,
       highlightText: "",
@@ -94,6 +99,11 @@ export const useAppStore = create<AppState>()(
       setZoom: (zoom) => {
         log.store.debug("Setting zoom", { zoom });
         set({ zoom });
+      },
+
+      setBgTheme: (bgTheme) => {
+        log.store.info("Setting bg theme", { bgTheme });
+        set({ bgTheme });
       },
 
       updatePaperLastPage: (path, lastPage) =>
@@ -176,6 +186,7 @@ export const useAppStore = create<AppState>()(
         activePaperPath: state.activePaperPath,
         currentPage: state.currentPage,
         zoom: state.zoom,
+        bgTheme: state.bgTheme,
       }),
       onRehydrateStorage: () => {
         log.store.info("Store rehydrating from persist middleware");

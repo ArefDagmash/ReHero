@@ -1,9 +1,17 @@
 @import "tailwindcss";
 
+@font-face {
+  font-family: "Excalifont";
+  src: url("/fonts/Excalifont-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
 @custom-variant dark (&:is(.dark *));
 
-@theme inline {
-  --font-sans: "Geist", ui-sans-serif, system-ui, sans-serif;
+@theme {
+  --font-sans: "Excalifont", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "Geist Mono", ui-monospace, monospace;
 
   --color-background: hsl(0 0% 3.9%);
@@ -85,4 +93,45 @@ body {
 .pdf-text-layer span::selection {
   background: transparent;
   color: transparent;
+}
+
+/* Theme overrides */
+html[data-theme="sepia"] {
+  --color-background: hsl(40 30% 92%);
+  --color-foreground: hsl(30 20% 15%);
+  --color-card: hsl(40 25% 88%);
+  --color-card-foreground: hsl(30 20% 15%);
+  --color-popover: hsl(40 25% 88%);
+  --color-popover-foreground: hsl(30 20% 15%);
+  --color-primary: hsl(30 20% 15%);
+  --color-primary-foreground: hsl(40 30% 92%);
+  --color-secondary: hsl(40 20% 82%);
+  --color-secondary-foreground: hsl(30 20% 15%);
+  --color-muted: hsl(40 20% 82%);
+  --color-muted-foreground: hsl(30 15% 40%);
+  --color-accent: hsl(40 20% 82%);
+  --color-accent-foreground: hsl(30 20% 15%);
+  --color-border: hsl(40 15% 70%);
+  --color-input: hsl(40 15% 70%);
+  --color-ring: hsl(30 20% 15%);
+}
+
+html[data-theme="light"] {
+  --color-background: hsl(0 0% 100%);
+  --color-foreground: hsl(0 0% 10%);
+  --color-card: hsl(0 0% 97%);
+  --color-card-foreground: hsl(0 0% 10%);
+  --color-popover: hsl(0 0% 97%);
+  --color-popover-foreground: hsl(0 0% 10%);
+  --color-primary: hsl(0 0% 10%);
+  --color-primary-foreground: hsl(0 0% 100%);
+  --color-secondary: hsl(0 0% 92%);
+  --color-secondary-foreground: hsl(0 0% 10%);
+  --color-muted: hsl(0 0% 92%);
+  --color-muted-foreground: hsl(0 0% 45%);
+  --color-accent: hsl(0 0% 92%);
+  --color-accent-foreground: hsl(0 0% 10%);
+  --color-border: hsl(0 0% 85%);
+  --color-input: hsl(0 0% 85%);
+  --color-ring: hsl(0 0% 10%);
 }

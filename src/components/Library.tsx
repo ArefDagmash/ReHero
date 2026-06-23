@@ -164,7 +164,7 @@ function Library() {
                 onClick={() => handlePaperClick(paper)}
               >
                 <CardHeader className="p-3 pb-1 pr-8 relative">
-                  <CardTitle className="text-sm font-medium truncate">
+                  <CardTitle className="text-sm font-medium line-clamp-2 break-words">
                     {paper.title}
                   </CardTitle>
                   <Button

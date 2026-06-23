@@ -3,6 +3,7 @@ import * as pdfjsLib from "pdfjs-dist";
 import pdfjsWorker from "pdfjs-dist/build/pdf.worker.mjs?url";
 import { motion, AnimatePresence } from "framer-motion";
 import rough from "roughjs";
+import { ChevronLeft, ChevronRight, Plus, Minus, Palette } from "lucide-react";
 import { useAppStore } from "@/store/useAppStore";
 import { log } from "@/lib/logger";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -54,8 +55,15 @@ function Reader() {
   const activePaperPath = useAppStore((s) => s.activePaperPath);
   const currentPage = useAppStore((s) => s.currentPage);
   const zoom = useAppStore((s) => s.zoom);
+  const bgTheme = useAppStore((s) => s.bgTheme);
+  const setPage = useAppStore((s) => s.setPage);
+  const setZoom = useAppStore((s) => s.setZoom);
+  const setBgTheme = useAppStore((s) => s.setBgTheme);
   const updatePaperLastPage = useAppStore((s) => s.updatePaperLastPage);
   const updatePaperTotalPages = useAppStore((s) => s.updatePaperTotalPages);
+  const activePaper = useAppStore((s) =>
+    s.papers.find((p) => p.filePath === s.activePaperPath),
+  );
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const textLayerRef = useRef<HTMLDivElement>(null);
@@ -68,6 +76,16 @@ function Reader() {
   const [skeletonDimensions, setSkeletonDimensions] = useState<{ width: number; height: number } | null>(null);
   const [doodleRects, setDoodleRects] = useState<{ x: number; y: number; w: number; h: number }[]>([]);
   const [sloppiness, setSloppiness] = useState<"clean" | "medium" | "sloppy">("clean");
+  const [doodleColor, setDoodleColor] = useState("red");
+  const [doodleStyle, setDoodleStyle] = useState<"underline" | "strikethrough" | "squiggly">("underline");
+  const [strokeCount, setStrokeCount] = useState(1);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [themeMenuOpen, setThemeMenuOpen] = useState(false);
+  const themeColors: Record<string, string> = {
+    dark: "hsl(0 0% 3.9%)",
+    sepia: "hsl(40 30% 92%)",
+    light: "hsl(0 0% 100%)",
+  };
   const doodleSvgRef = useRef<SVGSVGElement>(null);
   const renderTaskRef = useRef<pdfjsLib.RenderTask | null>(null);
   const activeLoadKeyRef = useRef<string | null>(null);
@@ -212,9 +230,20 @@ function Reader() {
   );
 
   useEffect(() => {
-    renderPage(currentPage);
-    setDoodleRects([]);
-  }, [currentPage, zoom, renderPage]);
+  useEffect(() => {
+    if (pdfDoc) renderPage(currentPage);
+  }, [zoom]);
+
+  const renderedKeyRef = useRef<string | null>(null);
+
+  const handlePageEnter = useCallback(() => {
+    const key = `${activePaperPath}-${currentPage}`;
+    if (renderedKeyRef.current !== key) {
+      renderedKeyRef.current = key;
+      setDoodleRects([]);
+      renderPage(currentPage);
+    }
+  }, [activePaperPath, currentPage, renderPage]);
 
   useEffect(() => {
     const svg = doodleSvgRef.current;
@@ -228,20 +257,44 @@ function Reader() {
       sloppy: { roughness: 2.0, bowing: 1.0 },
     };
     const s = slop[sloppiness];
-
     const rc = rough.svg(svg);
+
     for (const r of doodleRects) {
-      const y = r.y + r.h - 1;
-      svg.appendChild(
-        rc.line(r.x, y, r.x + r.w, y, {
-          stroke: "red",
-          strokeWidth: 2,
-          roughness: s.roughness,
-          bowing: s.bowing,
-        }),
-      );
+      const opts = {
+        stroke: doodleColor,
+        strokeWidth: 2,
+        roughness: s.roughness,
+        bowing: s.bowing,
+      };
+
+      const drawLine = (y: number, seed: number) => {
+        svg.appendChild(rc.line(r.x, y, r.x + r.w, y, { ...opts, seed }));
+      };
+
+      const drawRect = (seed: number) => {
+        const pad = 2;
+        svg.appendChild(
+          rc.rectangle(r.x - pad, r.y - pad, r.w + pad * 2, r.h + pad * 2, {
+            ...opts,
+            seed,
+            fill: "transparent",
+            fillStyle: "solid",
+          }),
+        );
+      };
+
+      for (let i = 0; i < strokeCount; i++) {
+        const seed = i + 1;
+        if (doodleStyle === "underline") {
+          drawLine(r.y + r.h - 1, seed);
+        } else if (doodleStyle === "strikethrough") {
+          drawLine(r.y + r.h / 2, seed);
+        } else {
+          drawRect(seed);
+        }
+      }
     }
-  }, [doodleRects, sloppiness]);
+  }, [doodleRects, sloppiness, doodleColor, doodleStyle, strokeCount]);
 
   const handleMouseDown = useCallback(() => {
     setDoodleRects([]);
@@ -302,6 +355,52 @@ function Reader() {
     });
   }, []);
 
+  const totalPages = activePaper?.totalPages ?? 0;
+
+  const goNext = useCallback(() => {
+    if (currentPage < totalPages) setPage(currentPage + 1);
+  }, [currentPage, totalPages, setPage]);
+
+  const goPrev = useCallback(() => {
+    if (currentPage > 1) setPage(currentPage - 1);
+  }, [currentPage, setPage]);
+
+  const zoomIn = useCallback(() => {
+    setZoom(Math.min(zoom + 0.25, 3.0));
+  }, [zoom, setZoom]);
+
+  const zoomOut = useCallback(() => {
+    setZoom(Math.max(zoom - 0.25, 0.5));
+  }, [zoom, setZoom]);
+
+  const [themeMenuOpen, setThemeMenuOpen] = useState(false);
+  const themeColors: Record<string, string> = {
+    dark: "hsl(0 0% 3.9%)",
+    sepia: "hsl(40 30% 92%)",
+    light: "hsl(0 0% 100%)",
+  };
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (e.key === "ArrowRight") goNext();
+      if (e.key === "ArrowLeft") goPrev();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [goNext, goPrev]);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = bgTheme;
+  }, [bgTheme]);
+
+  useEffect(() => {
+    if (!themeMenuOpen) return;
+    const close = () => setThemeMenuOpen(false);
+    window.addEventListener("mousedown", close);
+    return () => window.removeEventListener("mousedown", close);
+  }, [themeMenuOpen]);
+
   if (!activePaperPath) {
     return (
       <div className="flex-1 flex items-center justify-center text-muted-foreground">
@@ -356,9 +455,10 @@ function Reader() {
             <motion.div
               key={`${activePaperPath}-${currentPage}`}
               initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
+              animate={{ opacity: pageLoading ? 0 : 1 }}
               exit={{ opacity: 0 }}
-              transition={{ duration: 0.15 }}
+              transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
+              onAnimationStart={handlePageEnter}
               className="relative"
               style={{
                 boxShadow:
@@ -400,24 +500,196 @@ function Reader() {
       )}
 
       {activePaperPath && (
-        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-30 flex items-center gap-1 bg-background/80 border border-border rounded-full px-2 py-1 backdrop-blur-sm">
-          {(["clean", "medium", "sloppy"] as const).map((level) => (
+        <>
+          {/* Page nav: left arrow */}
+          <button
+            onClick={goPrev}
+            disabled={currentPage <= 1}
+            className="absolute left-3 top-1/2 -translate-y-1/2 z-20 p-2 rounded-full bg-background/60 hover:bg-background/80 border border-border transition-opacity backdrop-blur-sm disabled:opacity-20 disabled:cursor-default"
+            aria-label="Previous page"
+          >
+            <ChevronLeft className="h-5 w-5" />
+          </button>
+
+          {/* Page nav: right arrow */}
+          <button
+            onClick={goNext}
+            disabled={currentPage >= totalPages}
+            className="absolute right-3 top-1/2 -translate-y-1/2 z-20 p-2 rounded-full bg-background/60 hover:bg-background/80 border border-border transition-opacity backdrop-blur-sm disabled:opacity-20 disabled:cursor-default"
+            aria-label="Next page"
+          >
+            <ChevronRight className="h-5 w-5" />
+          </button>
+
+          {/* Zoom controls: top right */}
+          <div className="absolute top-3 right-3 z-20 flex items-center gap-0.5 bg-background/60 border border-border rounded-lg p-0.5 backdrop-blur-sm">
             <button
-              key={level}
-              onClick={(e) => {
-                e.stopPropagation();
-                setSloppiness(level);
-              }}
-              className={`px-2.5 py-0.5 rounded-full text-xs transition-colors ${
-                sloppiness === level
-                  ? "bg-primary text-primary-foreground"
-                  : "text-muted-foreground hover:text-foreground"
-              }`}
+              onClick={zoomOut}
+              disabled={zoom <= 0.5}
+              className="p-1.5 hover:bg-secondary/50 rounded disabled:opacity-20"
+              aria-label="Zoom out"
             >
-              {level}
+              <Minus className="h-3.5 w-3.5" />
             </button>
-          ))}
-        </div>
+            <span className="text-xs tabular-nums px-1 min-w-[36px] text-center">
+              {Math.round(zoom * 100)}%
+            </span>
+            <button
+              onClick={zoomIn}
+              disabled={zoom >= 3.0}
+              className="p-1.5 hover:bg-secondary/50 rounded disabled:opacity-20"
+              aria-label="Zoom in"
+            >
+              <Plus className="h-3.5 w-3.5" />
+            </button>
+          </div>
+
+          {/* Theme picker: top left */}
+          <div className="absolute top-3 left-3 z-20 flex items-center gap-1" onMouseDown={(e) => e.stopPropagation()}>
+            <button
+              onClick={() => setThemeMenuOpen(!themeMenuOpen)}
+              className="p-2 rounded-full bg-background/60 hover:bg-background/80 border border-border backdrop-blur-sm"
+              aria-label="Theme picker"
+            >
+              <Palette className="h-4 w-4" />
+            </button>
+
+            <AnimatePresence>
+              {themeMenuOpen && (
+                <motion.div
+                  initial={{ width: 0, opacity: 0 }}
+                  animate={{ width: "auto", opacity: 1 }}
+                  exit={{ width: 0, opacity: 0 }}
+                  transition={{ duration: 0.15 }}
+                  className="flex items-center gap-1.5 overflow-hidden bg-background/60 border border-border rounded-full px-2 py-1.5 backdrop-blur-sm"
+                >
+                  {(["dark", "sepia", "light"] as const).map((t) => (
+                    <button
+                      key={t}
+                      onClick={() => {
+                        setBgTheme(t);
+                        setThemeMenuOpen(false);
+                      }}
+                      className={`w-5 h-5 rounded-full border-2 transition-transform hover:scale-110 ${
+                        bgTheme === t ? "border-foreground scale-110" : "border-transparent"
+                      }`}
+                      style={{ background: themeColors[t] }}
+                      aria-label={`${t} theme`}
+                      title={t.charAt(0).toUpperCase() + t.slice(1)}
+                    />
+                  ))}
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+
+          {/* Settings panel: top center */}
+          <div className="fixed top-4 left-1/2 -translate-x-1/2 z-30 flex flex-col items-center gap-1" onMouseDown={(e) => e.stopPropagation()}>
+            {settingsOpen && (
+              <motion.div
+                initial={{ opacity: 0, y: -8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -8 }}
+                transition={{ duration: 0.15 }}
+                className="flex flex-col gap-2 bg-background/90 border border-border rounded-xl p-3 backdrop-blur-sm mt-1"
+              >
+                {/* Color row */}
+                <div className="flex items-center gap-1">
+                  {["red", "blue", "green", "orange", "purple", "yellow"].map(
+                    (c) => (
+                      <button
+                        key={c}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setDoodleColor(c);
+                        }}
+                        className={`w-5 h-5 rounded-full border-2 transition-transform hover:scale-110 ${
+                          doodleColor === c
+                            ? "border-foreground scale-110"
+                            : "border-transparent"
+                        }`}
+                        style={{ background: c }}
+                      />
+                    ),
+                  )}
+                </div>
+
+                {/* Style row */}
+                <div className="flex items-center gap-1">
+                  {(["underline", "strikethrough", "squiggly"] as const).map(
+                    (style) => (
+                      <button
+                        key={style}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setDoodleStyle(style);
+                        }}
+                        className={`px-2 py-0.5 rounded-full text-xs transition-colors ${
+                          doodleStyle === style
+                            ? "bg-primary text-primary-foreground"
+                            : "text-muted-foreground hover:text-foreground"
+                        }`}
+                      >
+                        {style}
+                      </button>
+                    ),
+                  )}
+                </div>
+
+                {/* Stroke count row */}
+                <div className="flex items-center gap-1">
+                  {[1, 2, 3].map((n) => (
+                    <button
+                      key={n}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setStrokeCount(n);
+                      }}
+                      className={`px-2 py-0.5 rounded-full text-xs transition-colors ${
+                        strokeCount === n
+                          ? "bg-primary text-primary-foreground"
+                          : "text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      {n}x
+                    </button>
+                  ))}
+                </div>
+
+                {/* Sloppiness row */}
+                <div className="flex items-center gap-1">
+                  {(["clean", "medium", "sloppy"] as const).map((level) => (
+                    <button
+                      key={level}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setSloppiness(level);
+                      }}
+                      className={`px-2 py-0.5 rounded-full text-xs transition-colors ${
+                        sloppiness === level
+                          ? "bg-primary text-primary-foreground"
+                          : "text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      {level}
+                    </button>
+                  ))}
+                </div>
+              </motion.div>
+            )}
+
+            <button
+              onClick={() => setSettingsOpen(!settingsOpen)}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-background/80 border border-border backdrop-blur-sm text-xs text-muted-foreground hover:text-foreground transition-colors"
+            >
+              <span
+                className="w-2.5 h-2.5 rounded-full"
+                style={{ background: doodleColor }}
+              />
+              settings
+            </button>
+          </div>
+        </>
       )}
     </div>
   );
