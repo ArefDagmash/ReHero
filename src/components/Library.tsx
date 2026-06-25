@@ -1,14 +1,6 @@
 import { useCallback, useRef } from "react";
 import { v4 as uuidv4 } from "uuid";
 import { FileUp, FileText, Trash2 } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardHeader,
-  CardTitle,
-  CardContent,
-} from "@/components/ui/card";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { useAppStore } from "@/store/useAppStore";
 import { log } from "@/lib/logger";
 import type { Paper } from "@/types";
@@ -34,12 +26,24 @@ function revokeStaleUrls(keepPath: string | null) {
   }
 }
 
-function Library() {
+type LibraryProps = {
+  onSelect?: () => void;
+};
+
+function Library({ onSelect }: LibraryProps) {
   const papers = useAppStore((s) => s.papers);
   const activePaperPath = useAppStore((s) => s.activePaperPath);
   const setActivePaper = useAppStore((s) => s.setActivePaper);
   const addPaper = useAppStore((s) => s.addPaper);
   const removePaper = useAppStore((s) => s.removePaper);
+  const doodleColor = useAppStore((s) => s.doodleColor);
+  const doodleStyle = useAppStore((s) => s.doodleStyle);
+  const strokeCount = useAppStore((s) => s.strokeCount);
+  const sloppiness = useAppStore((s) => s.sloppiness);
+  const setDoodleColor = useAppStore((s) => s.setDoodleColor);
+  const setDoodleStyle = useAppStore((s) => s.setDoodleStyle);
+  const setStrokeCount = useAppStore((s) => s.setStrokeCount);
+  const setSloppiness = useAppStore((s) => s.setSloppiness);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleFileSelected = useCallback(
@@ -58,18 +62,15 @@ function Library() {
         lastPage: 1,
         tags: [],
       };
-      log.library.info("Paper created", { id: paper.id, title: paper.title, filePath: paper.filePath });
       revokeStaleUrls(url);
       addPaper(paper);
-      log.library.info("Paper added to store");
+      onSelect?.();
     },
-    [addPaper],
+    [addPaper, onSelect],
   );
 
   const handleOpenPdf = useCallback(async () => {
-    log.library.info("Open PDF button clicked");
     if (isTauri()) {
-      log.library.info("Running in Tauri, opening native dialog");
       try {
         const { open } = await import("@tauri-apps/plugin-dialog");
         const selected = await open({
@@ -81,7 +82,6 @@ function Library() {
             typeof selected === "string" ? selected : selected[0];
           const fileName =
             filePath.split("/").pop()?.replace(/\.pdf$/i, "") ?? filePath;
-          log.library.info("Tauri file selected", { filePath, fileName });
           const paper: Paper = {
             id: uuidv4(),
             title: fileName,
@@ -91,38 +91,39 @@ function Library() {
             tags: [],
           };
           addPaper(paper);
-        } else {
-          log.library.debug("File dialog cancelled");
+          onSelect?.();
         }
       } catch (e) {
         log.library.error("Tauri dialog failed", e);
       }
     } else {
-      log.library.info("Running in browser, triggering file input");
       fileInputRef.current?.click();
     }
-  }, [addPaper]);
+  }, [addPaper, onSelect]);
 
-  const handlePaperClick = useCallback((paper: Paper) => {
-    log.library.info("Paper clicked", { title: paper.title, filePath: paper.filePath });
-    setActivePaper(paper.filePath);
-  }, [setActivePaper]);
+  const handlePaperClick = useCallback(
+    (paper: Paper) => {
+      setActivePaper(paper.filePath);
+      onSelect?.();
+    },
+    [setActivePaper, onSelect],
+  );
 
-  const handleDeletePaper = useCallback((e: React.MouseEvent, paper: Paper) => {
-    e.stopPropagation();
-    log.library.info("Deleting paper", { id: paper.id, title: paper.title });
-    if (paper.filePath.startsWith("blob:")) {
-      URL.revokeObjectURL(paper.filePath);
-      objectUrls.delete(paper.filePath);
-    }
-    removePaper(paper.id);
-  }, [removePaper]);
-
-  log.library.debug("Library render", { paperCount: papers.length, activePaperPath });
+  const handleDeletePaper = useCallback(
+    (e: React.MouseEvent, paper: Paper) => {
+      e.stopPropagation();
+      if (paper.filePath.startsWith("blob:")) {
+        URL.revokeObjectURL(paper.filePath);
+        objectUrls.delete(paper.filePath);
+      }
+      removePaper(paper.id);
+    },
+    [removePaper],
+  );
 
   return (
-    <div className="flex flex-col h-full">
-      <div className="p-3 border-b">
+    <div className="flex flex-col h-full bg-card">
+      <div className="p-4">
         <input
           ref={fileInputRef}
           type="file"
@@ -134,59 +135,111 @@ function Library() {
             e.target.value = "";
           }}
         />
-        <Button
-          variant="outline"
-          className="w-full justify-start gap-2"
+        <button
           onClick={handleOpenPdf}
+          className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
         >
           <FileUp className="h-4 w-4" />
           Open PDF
-        </Button>
+        </button>
       </div>
 
-      <ScrollArea className="flex-1">
+      <div className="flex-1 overflow-auto px-2 pb-4">
         {papers.length === 0 ? (
           <div className="flex flex-col items-center justify-center p-8 text-muted-foreground text-sm text-center">
-            <FileText className="h-8 w-8 mb-2 opacity-50" />
-            <p>No papers yet.</p>
-            <p>Open a PDF to get started.</p>
+            <FileText className="h-8 w-8 mb-2 opacity-40" />
+            <p>No papers yet</p>
+            <p className="text-xs mt-0.5">Open a PDF to get started</p>
           </div>
         ) : (
-          <div className="flex flex-col gap-1 p-2">
+          <div className="flex flex-col gap-0.5">
             {papers.map((paper) => (
-              <Card
+              <div
                 key={paper.id}
-                className={`group cursor-pointer transition-colors hover:bg-accent ${
-                  activePaperPath === paper.filePath
-                    ? "bg-accent border-primary/50"
-                    : "bg-transparent border-transparent"
-                }`}
                 onClick={() => handlePaperClick(paper)}
+                className={`group relative px-3 py-2 rounded-lg cursor-pointer transition-colors ${
+                  activePaperPath === paper.filePath
+                    ? "bg-secondary"
+                    : "hover:bg-secondary/50"
+                }`}
               >
-                <CardHeader className="p-3 pb-1 pr-8 relative">
-                  <CardTitle className="text-sm font-medium line-clamp-2 break-words">
-                    {paper.title}
-                  </CardTitle>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-6 w-6 absolute right-2 top-2 opacity-0 group-hover:opacity-100 transition-opacity"
-                    onClick={(e) => handleDeletePaper(e, paper)}
-                  >
-                    <Trash2 className="h-3 w-3 text-muted-foreground hover:text-destructive" />
-                  </Button>
-                </CardHeader>
-                <CardContent className="p-3 pt-0">
-                  <p className="text-xs text-muted-foreground">
-                    Page {paper.lastPage}
-                    {paper.totalPages > 0 ? ` / ${paper.totalPages}` : ""}
-                  </p>
-                </CardContent>
-              </Card>
+                <p className="text-sm font-medium text-foreground leading-snug line-clamp-2 break-words pr-6">
+                  {paper.title}
+                </p>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  p.{paper.lastPage}
+                  {paper.totalPages > 0 ? ` / ${paper.totalPages}` : ""}
+                </p>
+                <button
+                  onClick={(e) => handleDeletePaper(e, paper)}
+                  className="absolute right-2 top-2 h-6 w-6 flex items-center justify-center rounded opacity-0 group-hover:opacity-100 transition-opacity hover:bg-destructive/10"
+                >
+                  <Trash2 className="h-3 w-3 text-muted-foreground hover:text-destructive" />
+                </button>
+              </div>
             ))}
           </div>
         )}
-      </ScrollArea>
+      </div>
+
+      <div className="border-t border-border mt-auto px-4 py-3 space-y-3">
+        <p className="text-xs text-muted-foreground font-medium">Selection style</p>
+
+        <div className="flex items-center gap-1">
+          {["red", "blue", "green", "orange", "purple", "yellow"].map((c) => (
+            <button
+              key={c}
+              onClick={() => setDoodleColor(c)}
+              className={`w-5 h-5 rounded-full transition-transform hover:scale-110 ${
+                doodleColor === c ? "ring-2 ring-foreground ring-offset-1 scale-110" : ""
+              }`}
+              style={{ background: c }}
+            />
+          ))}
+        </div>
+
+        <div className="flex items-center gap-1">
+          {(["underline", "strikethrough", "squiggly"] as const).map((s) => (
+            <button
+              key={s}
+              onClick={() => setDoodleStyle(s)}
+              className={`px-2 py-0.5 rounded text-xs transition-colors ${
+                doodleStyle === s ? "bg-foreground text-background" : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {s}
+            </button>
+          ))}
+        </div>
+
+        <div className="flex items-center gap-1">
+          {[1, 2, 3].map((n) => (
+            <button
+              key={n}
+              onClick={() => setStrokeCount(n)}
+              className={`px-2 py-0.5 rounded text-xs transition-colors ${
+                strokeCount === n ? "bg-foreground text-background" : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {n}x
+            </button>
+          ))}
+        </div>
+
+        <div className="flex items-center gap-1">
+          {(["clean", "medium", "sloppy"] as const).map((level) => (
+            <button
+              key={level}
+              onClick={() => setSloppiness(level)}
+              className={`px-2 py-0.5 rounded text-xs transition-colors ${
+                sloppiness === level ? "bg-foreground text-background" : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {level}
+            </button>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }

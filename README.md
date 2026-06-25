@@ -29,6 +29,7 @@ npm run tauri build    # Production binary + deb/rpm bundles
 | Rough lines    | roughjs v4                               |
 | Animations     | framer-motion v11                       |
 | Icons          | lucide-react                            |
+| Images         | Wikimedia Commons API (no key needed)    |
 | Logging        | Custom timestamped console logger       |
 | Utils          | clsx, tailwind-merge, class-variance-authority, uuid |
 
@@ -177,12 +178,34 @@ All floating controls use `backdrop-blur-sm` translucent backgrounds with border
 
 ### Highlight Menu (`HighlightMenu.tsx`)
 
-Floating bubble appears near text selection on `mouseup`. Auto-dismisses when selection is cleared.
+Floating bubble appears near text selection on `mouseup`. Four buttons:
 
 | Button      | Action                                                     |
 | ----------- | ---------------------------------------------------------- |
-| **Add Note**  | Saves selected text as annotation for the current page   |
+| **Pin**       | Persists the doodle underline on the page (no text). Stays across page turns. |
+| **Note**      | Opens an inline note popover → type a note → save. Doodle stays + note attached. |
 | **Ask AI**    | Opens a Dialog for AI-powered Q&A about the selection    |
+| **Images**    | Opens a floating, draggable, resizable window with image search results |
+
+### Pinned Doodles
+
+- Stored in Zustand per paper+page, persisted to localStorage
+- Each pin stores: ID, optional note text, zoom level at pin time, and selection rects
+- On render, rects are scaled by `currentZoom / pinZoom` to match any zoom level
+- The rough.js SVG overlay renders both live selection lines and pinned lines together
+- Pin markers appear on the left edge of the canvas (CSS-positioned) — one per annotation anchored to the first rect
+- Click a pin marker → inline note editor opens (or toggles close). "Remove" link deletes the pin
+- Multi-line highlights show one pin marker for the whole annotation
+- Settings (color, style, strokes, sloppiness, background) accessible from homepage and reader top-bar
+
+### Image Search (`ImageSearchPanel.tsx`)
+
+Draggable, resizable floating window (500×600 default). Features:
+
+- **Wikimedia Commons** — embedded image results (no API key, no limits, CORS-enabled)
+- **YouTube** / **Google** — single-press buttons open search in browser tab
+- Click any image → lightbox overlay with zoom (scroll wheel 50%-500%), drag-to-pan, and original-link button
+- Lightbox shows zoom percentage, ↗ opens original URL in new tab
 
 ### AI Chat (Ask AI)
 
@@ -395,5 +418,4 @@ tauri::Builder::default()
 - Cloud sync
 - Full-text search
 - Tag management
-- Annotation panel re-integration into the minimal UI
 - Book mode vs paper mode toggle

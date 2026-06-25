@@ -1,44 +1,30 @@
-import { useCallback, useState } from "react";
-import { PanelLeft } from "lucide-react";
-import { Separator } from "@/components/ui/separator";
-import Library from "@/components/Library";
+import { useState } from "react";
 import Reader from "@/components/Reader";
+import HomePage from "@/components/HomePage";
 import HighlightMenu from "@/components/HighlightMenu";
-import { log } from "@/lib/logger";
+import ImageSearchPanel from "@/components/ImageSearchPanel";
+import { useAppStore } from "@/store/useAppStore";
 
 function App() {
-  const [libraryOpen, setLibraryOpen] = useState(true);
-
-  const toggleLibrary = useCallback(() => {
-    log.app.info("Toggle library sidebar", { open: !libraryOpen });
-    setLibraryOpen((v) => !v);
-  }, [libraryOpen]);
+  const [view, setView] = useState<"home" | "reader">("home");
 
   return (
     <div className="h-full flex flex-col">
-      <div className="flex flex-1 overflow-hidden relative">
-        {libraryOpen && (
-          <>
-            <aside className="w-72 shrink-0 overflow-hidden bg-background">
-              <Library />
-            </aside>
-            <Separator orientation="vertical" />
-          </>
+      <div className="flex-1 overflow-hidden relative flex">
+        {view === "home" ? (
+          <HomePage onOpenPaper={() => setView("reader")} />
+        ) : (
+          <Reader
+            onBack={() => {
+              setView("home");
+              useAppStore.setState({ activePaperPath: null });
+            }}
+          />
         )}
-
-        <Reader />
-
-        {/* Library toggle */}
-        <button
-          onClick={toggleLibrary}
-          className="fixed bottom-4 left-4 z-50 p-2 rounded-full bg-background/60 hover:bg-background/80 border border-border backdrop-blur-sm"
-          title={libraryOpen ? "Close library" : "Open library"}
-        >
-          <PanelLeft className="h-4 w-4" />
-        </button>
       </div>
 
       <HighlightMenu />
+      <ImageSearchPanel />
     </div>
   );
 }

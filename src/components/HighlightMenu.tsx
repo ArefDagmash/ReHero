@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from "react";
-import { MessageSquare, Sparkles } from "lucide-react";
+import { MessageSquare, Sparkles, Image } from "lucide-react";
 import { v4 as uuidv4 } from "uuid";
 import { Button } from "@/components/ui/button";
 import {
@@ -12,7 +12,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useAppStore } from "@/store/useAppStore";
 import { log } from "@/lib/logger";
-import type { Annotation, ChatMessage } from "@/types";
+import type { ChatMessage } from "@/types";
 
 function HighlightMenu() {
   const highlightMenuVisible = useAppStore((s) => s.highlightMenuVisible);
@@ -20,7 +20,11 @@ function HighlightMenu() {
   const highlightRect = useAppStore((s) => s.highlightRect);
   const activePaperPath = useAppStore((s) => s.activePaperPath);
   const currentPage = useAppStore((s) => s.currentPage);
-  const addAnnotation = useAppStore((s) => s.addAnnotation);
+  const zoom = useAppStore((s) => s.zoom);
+  const addPinnedDoodle = useAppStore((s) => s.addPinnedDoodle);
+
+  const [noteOpen, setNoteOpen] = useState(false);
+  const [noteText, setNoteText] = useState("");
 
   const [aiDialogOpen, setAiDialogOpen] = useState(false);
   const [question, setQuestion] = useState("");
@@ -43,19 +47,50 @@ function HighlightMenu() {
     return () => document.removeEventListener("click", handleClick);
   }, []);
 
-  const handleAddNote = useCallback(() => {
-    if (!activePaperPath || !highlightText) return;
-    const annotation: Annotation = {
+  const getDoodleKey = useCallback(() => {
+    return `${activePaperPath}-${currentPage}`;
+  }, [activePaperPath, currentPage]);
+
+  const handlePin = useCallback(() => {
+    if (!activePaperPath) return;
+    const key = getDoodleKey();
+    const doodle = {
       id: uuidv4(),
-      pageNumber: currentPage,
-      highlightedText: highlightText,
       note: "",
-      createdAt: new Date().toISOString(),
+      zoom,
+      rects: useAppStore.getState().currentDoodleRects,
     };
-    log.highlight.info("Adding highlight note", { id: annotation.id, pageNumber: currentPage, textLength: highlightText.length });
-    addAnnotation(activePaperPath, annotation);
+    addPinnedDoodle(key, doodle);
     useAppStore.setState({ highlightMenuVisible: false });
-  }, [activePaperPath, highlightText, currentPage, addAnnotation]);
+  }, [activePaperPath, zoom, getDoodleKey, addPinnedDoodle]);
+
+  const handleNote = useCallback(() => {
+    if (!activePaperPath) return;
+    setNoteText("");
+    setNoteOpen(true);
+  }, [activePaperPath]);
+
+  const handleNoteSave = useCallback(() => {
+    const key = getDoodleKey();
+    const doodle = {
+      id: uuidv4(),
+      note: noteText,
+      zoom,
+      rects: useAppStore.getState().currentDoodleRects,
+    };
+    addPinnedDoodle(key, doodle);
+    setNoteOpen(false);
+    useAppStore.setState({ highlightMenuVisible: false });
+  }, [getDoodleKey, zoom, addPinnedDoodle, noteText]);
+
+  const handleImageSearch = useCallback(() => {
+    if (!highlightText) return;
+    useAppStore.setState({
+      imageSearchTerm: highlightText,
+      imageSearchOpen: true,
+      highlightMenuVisible: false,
+    });
+  }, [highlightText]);
 
   const handleAskAI = useCallback(() => {
     log.highlight.info("Opening AI dialog", { textLength: highlightText.length });
@@ -186,10 +221,19 @@ function HighlightMenu() {
           variant="ghost"
           size="sm"
           className="h-8 gap-1 text-xs"
-          onClick={handleAddNote}
+          onClick={handlePin}
+        >
+          <img src="/pin.svg" className="h-3.5 w-3.5" alt="Pin" />
+          Pin
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-8 gap-1 text-xs"
+          onClick={handleNote}
         >
           <MessageSquare className="h-3 w-3" />
-          Add Note
+          Note
         </Button>
         <Button
           variant="ghost"
@@ -200,7 +244,55 @@ function HighlightMenu() {
           <Sparkles className="h-3 w-3" />
           Ask AI
         </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-8 gap-1 text-xs"
+          onClick={handleImageSearch}
+        >
+          <Image className="h-3 w-3" />
+          Images
+        </Button>
       </div>
+
+      {/* Inline note popover */}
+      {noteOpen && (
+        <div
+          className="fixed z-[101] bg-popover border border-border rounded-lg shadow-lg p-3 w-64"
+          style={{ left: highlightRect.x - 100, top: highlightRect.y - 120 }}
+        >
+          <Textarea
+            value={noteText}
+            onChange={(e) => setNoteText(e.target.value)}
+            placeholder="Add a note..."
+            className="min-h-[60px] text-xs resize-none"
+            autoFocus
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                handleNoteSave();
+              }
+            }}
+          />
+          <div className="flex justify-end gap-1 mt-2">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 text-xs"
+              onClick={() => setNoteOpen(false)}
+            >
+              cancel
+            </Button>
+            <Button
+              size="sm"
+              className="h-7 text-xs"
+              onClick={handleNoteSave}
+            >
+              save
+            </Button>
+          </div>
+        </div>
+      )}
 
       <Dialog
         open={aiDialogOpen}

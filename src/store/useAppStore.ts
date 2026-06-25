@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
+import { deletePdf } from "@/lib/pdfStorage";
 import { log } from "@/lib/logger";
 import type { Paper, Annotation } from "@/types";
 
@@ -28,6 +29,17 @@ function saveAnnotations(data: Record<string, Annotation[]>) {
 }
 
 type BgTheme = "dark" | "sepia" | "light";
+type DoodleStyle = "underline" | "strikethrough" | "squiggly";
+type Sloppiness = "clean" | "medium" | "sloppy";
+
+type DoodleRect = { x: number; y: number; w: number; h: number };
+
+type PinnedDoodle = {
+  id: string;
+  note: string;
+  zoom: number;
+  rects: DoodleRect[];
+};
 
 type AppState = {
   papers: Paper[];
@@ -41,7 +53,25 @@ type AppState = {
   highlightText: string;
   highlightRect: { x: number; y: number } | null;
 
+  imageSearchTerm: string;
+  imageSearchOpen: boolean;
+
+  currentDoodleRects: DoodleRect[];
+  pinnedDoodles: Record<string, PinnedDoodle[]>;
+
+  doodleColor: string;
+  doodleStyle: DoodleStyle;
+  strokeCount: number;
+  sloppiness: Sloppiness;
+
   setBgTheme: (theme: BgTheme) => void;
+  setDoodleColor: (color: string) => void;
+  setDoodleStyle: (style: DoodleStyle) => void;
+  setStrokeCount: (count: number) => void;
+  setSloppiness: (level: Sloppiness) => void;
+  addPinnedDoodle: (key: string, doodle: PinnedDoodle) => void;
+  removePinnedDoodle: (key: string, id: string) => void;
+  updatePinnedNote: (key: string, id: string, note: string) => void;
   addPaper: (paper: Paper) => void;
   setActivePaper: (path: string | null) => void;
   setPage: (page: number) => void;
@@ -61,11 +91,22 @@ export const useAppStore = create<AppState>()(
       activePaperPath: null,
       currentPage: 1,
       zoom: 1.0,
-      bgTheme: "dark",
+      bgTheme: "light",
       annotations: {},
       highlightMenuVisible: false,
       highlightText: "",
       highlightRect: null,
+
+      imageSearchTerm: "",
+      imageSearchOpen: false,
+
+      currentDoodleRects: [],
+      pinnedDoodles: {},
+
+      doodleColor: "red",
+      doodleStyle: "underline",
+      strokeCount: 1,
+      sloppiness: "clean",
 
       addPaper: (paper) =>
         set((state) => {
@@ -105,6 +146,37 @@ export const useAppStore = create<AppState>()(
         log.store.info("Setting bg theme", { bgTheme });
         set({ bgTheme });
       },
+
+      setDoodleColor: (doodleColor) => set({ doodleColor }),
+      setDoodleStyle: (doodleStyle) => set({ doodleStyle }),
+      setStrokeCount: (strokeCount) => set({ strokeCount }),
+      setSloppiness: (sloppiness) => set({ sloppiness }),
+
+      addPinnedDoodle: (key, doodle) =>
+        set((state) => ({
+          pinnedDoodles: {
+            ...state.pinnedDoodles,
+            [key]: [...(state.pinnedDoodles[key] || []), doodle],
+          },
+        })),
+
+      removePinnedDoodle: (key, id) =>
+        set((state) => ({
+          pinnedDoodles: {
+            ...state.pinnedDoodles,
+            [key]: (state.pinnedDoodles[key] || []).filter((d) => d.id !== id),
+          },
+        })),
+
+      updatePinnedNote: (key, id, note) =>
+        set((state) => ({
+          pinnedDoodles: {
+            ...state.pinnedDoodles,
+            [key]: (state.pinnedDoodles[key] || []).map((d) =>
+              d.id === id ? { ...d, note } : d,
+            ),
+          },
+        })),
 
       updatePaperLastPage: (path, lastPage) =>
         set((state) => {
@@ -161,6 +233,10 @@ export const useAppStore = create<AppState>()(
 
         log.store.info("Removing paper", { id, title: paper.title });
 
+        if (paper.filePath.startsWith("idb://")) {
+          deletePdf(id).catch(() => {});
+        }
+
         if (state.activePaperPath === paper.filePath) {
           const remaining = state.papers.filter((p) => p.id !== id);
           set({
@@ -187,6 +263,7 @@ export const useAppStore = create<AppState>()(
         currentPage: state.currentPage,
         zoom: state.zoom,
         bgTheme: state.bgTheme,
+        pinnedDoodles: state.pinnedDoodles,
       }),
       onRehydrateStorage: () => {
         log.store.info("Store rehydrating from persist middleware");
