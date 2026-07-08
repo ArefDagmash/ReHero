@@ -12,6 +12,15 @@ dist
 dist-ssr
 *.local
 
+# Rust build output
+src-tauri/target
+
+# Python bytecode cache
+__pycache__
+
+# graphify analysis tool output (local dev aid, not project source)
+graphify-out
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

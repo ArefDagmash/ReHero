@@ -1,0 +1,59 @@
+flowchart TD
+    AppStart(["ReHero — Tauri Desktop App<br>local-first · no backend"]):::trigger
+
+    ShipDecision{"Ship as...?"}:::decision
+    AppStart --> ShipDecision
+
+    ShipDecision -->|"Desktop App ✓"| Distribution
+    ShipDecision -->|"Web App ✗"| WebSkip["Skip — no filesystem<br>access, no Tauri APIs"]:::error
+
+    subgraph Distribution["Distribution — GitHub Releases"]
+        direction LR
+        MacDmg[".dmg<br>macOS"]
+        WinMsi[".msi<br>Windows"]
+        LinuxAppImage[".AppImage<br>Linux"]
+    end
+
+    Distribution --> MasDecision{"Mac App Store?"}:::decision
+    MasDecision -->|"Skip ✗"| MasSkip["Sandbox blocks<br>localhost connections"]:::error
+    MasDecision -->|"GitHub Releases ✓"| AIFlow
+
+    subgraph AIFlow["AI Setup Flow"]
+        direction TD
+        Launch["App Launches"]
+        DetectOllama{"Ollama running at<br>localhost:11434?"}:::decision
+        ShowLink["Show download link<br>ollama.com"]:::error
+        UserInstalls["User installs Ollama"]
+        PickModel["Pick a model"]:::ai
+        OllamaPull["ollama pull &lt;model&gt;"]:::ai
+        ReadyWithOllama(["Ready — local AI"]):::success
+
+        Launch --> DetectOllama
+        DetectOllama -->|"Not found"| ShowLink
+        ShowLink --> UserInstalls
+        UserInstalls --> PickModel
+        PickModel --> OllamaPull
+        OllamaPull --> ReadyWithOllama
+        DetectOllama -->|"Found"| ReadyWithOllama
+    end
+
+    subgraph Settings["Settings — Cloud API Keys (Optional)"]
+        direction LR
+        AnthropicKey["Anthropic API Key"]:::ai
+        OpenAIKey["OpenAI API Key"]:::ai
+        OpenCodeKey["OpenCode API Key"]:::ai
+    end
+
+    AIFlow --> Settings
+
+    V2Decision{"v2: Users request sync?"}:::decision
+    Settings --> V2Decision
+    V2Decision -->|"Yes"| VPS["VPS + Postgres backend"]:::primary
+    V2Decision -->|"No"| StayLocal(["Stay local-first"]):::success
+
+    classDef trigger fill:#fed7aa,stroke:#c2410c,color:#374151
+    classDef decision fill:#fef3c7,stroke:#b45309,color:#374151
+    classDef success fill:#a7f3d0,stroke:#047857,color:#374151
+    classDef error fill:#fecaca,stroke:#b91c1c,color:#374151
+    classDef ai fill:#ddd6fe,stroke:#6d28d9,color:#374151
+    classDef primary fill:#3b82f6,stroke:#1e3a5f,color:#ffffff

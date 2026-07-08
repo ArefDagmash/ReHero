@@ -50,14 +50,73 @@ type ThreadEntry = {
   sourceHighlight?: string;
 };
 
+// ponytail: compute arrow endpoints dynamically based on relative window positions
+function computeArrowEndpoints(
+  sourceRect: { left: number; top: number; right: number; bottom: number; width: number; height: number },
+  targetRect: { left: number; top: number; right: number; bottom: number; width: number; height: number },
+) {
+  const scx = sourceRect.left + sourceRect.width / 2;
+  const scy = sourceRect.top + sourceRect.height / 2;
+  const tcx = targetRect.left + targetRect.width / 2;
+  const tcy = targetRect.top + targetRect.height / 2;
+  const dx = tcx - scx;
+  const dy = tcy - scy;
+
+  if (Math.abs(dx) >= Math.abs(dy)) {
+    // Horizontal-dominant: connect side edges
+    if (dx > 0) {
+      // Target is to the right
+      return {
+        from: { x: sourceRect.right, y: scy },
+        to: { x: targetRect.left, y: tcy },
+      };
+    } else {
+      // Target is to the left
+      return {
+        from: { x: sourceRect.left, y: scy },
+        to: { x: targetRect.right, y: tcy },
+      };
+    }
+  } else {
+    // Vertical-dominant: connect top/bottom edges
+    if (dy > 0) {
+      // Target is below
+      return {
+        from: { x: scx, y: sourceRect.bottom },
+        to: { x: tcx, y: targetRect.top },
+      };
+    } else {
+      // Target is above
+      return {
+        from: { x: scx, y: sourceRect.top },
+        to: { x: tcx, y: targetRect.bottom },
+      };
+    }
+  }
+}
+
 function Arrow({ from, to }: { from: { x: number; y: number }; to: { x: number; y: number } }) {
   const sx = from.x;
   const sy = from.y;
   const ex = to.x;
   const ey = to.y;
-  const midX = sx + (ex - sx) * 0.5;
-  const d = `M ${sx} ${sy} L ${midX} ${sy} L ${midX} ${ey} L ${ex} ${ey}`;
-  const angle = Math.atan2(ey - sy, ex - midX);
+  const dx = Math.abs(ex - sx);
+  const dy = Math.abs(ey - sy);
+
+  let d: string;
+  let angle: number;
+  if (dx >= dy) {
+    // Horizontal-first L-shape
+    const midX = sx + (ex - sx) * 0.5;
+    d = `M ${sx} ${sy} L ${midX} ${sy} L ${midX} ${ey} L ${ex} ${ey}`;
+    angle = Math.atan2(ey - sy, ex - midX);
+  } else {
+    // Vertical-first L-shape
+    const midY = sy + (ey - sy) * 0.5;
+    d = `M ${sx} ${sy} L ${sx} ${midY} L ${ex} ${midY} L ${ex} ${ey}`;
+    angle = Math.atan2(ey - midY, ex - sx);
+  }
+
   const ah = 6;
   const p1x = ex - ah * Math.cos(angle - 0.5);
   const p1y = ey - ah * Math.sin(angle - 0.5);
@@ -134,7 +193,7 @@ function ThreadEntryBlock({
             className="fixed z-[100] flex items-center gap-1 px-2 py-1 rounded-md bg-popover border border-border shadow-md text-xs text-foreground hover:bg-secondary transition-colors"
             style={{ left: followPos.x - 40, top: followPos.y }}
           >
-            <ArrowUp className="h-3 w-3" /> Ask follow-up
+            <ArrowUp className="h-3 w-3" /> Branch
           </button>
         )}
       </div>
@@ -201,7 +260,7 @@ function FollowUpWindow({
     >
       <div className="flex items-center gap-1 cursor-move" onMouseDown={onDragStart}>
         <Move className="h-3 w-3 text-muted-foreground" />
-        <span className="text-xs font-medium text-muted-foreground flex-1">Follow-up</span>
+        <span className="text-xs font-medium text-muted-foreground flex-1">Branch</span>
         <button onClick={onClose} className="p-0.5 rounded text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors">
           <X className="h-3 w-3" />
         </button>
@@ -213,7 +272,7 @@ function FollowUpWindow({
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
-            placeholder="Ask a follow-up..."
+            placeholder="Branch from this..."
             autoFocus
             className="w-full min-h-[60px] rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground/50 resize-none focus:outline-none focus:ring-1 focus:ring-ring"
           />
@@ -245,6 +304,58 @@ function FollowUpWindow({
           <div className="text-sm text-foreground leading-relaxed md-content overflow-y-auto max-h-[200px]" dangerouslySetInnerHTML={{ __html: renderMarkdown(answer) }} />
         </div>
       )}
+    </div>
+  );
+}
+
+// ponytail: read-only floating window for saved branch entries when revisiting via sparkle
+function SavedBranchWindow({
+  entry,
+  initialPos,
+  onClose,
+}: {
+  entry: StoredEntry;
+  initialPos: { x: number; y: number };
+  onClose: () => void;
+}) {
+  const [pos, setPos] = useState(initialPos);
+  const dragging = useRef(false);
+  const offset = useRef({ x: 0, y: 0 });
+
+  const onDragStart = useCallback((e: React.MouseEvent) => {
+    if ((e.target as HTMLElement).closest("button")) return;
+    e.stopPropagation();
+    dragging.current = true;
+    offset.current = { x: e.clientX - pos.x, y: e.clientY - pos.y };
+    const onMove = (ev: MouseEvent) => {
+      if (!dragging.current) return;
+      setPos({ x: ev.clientX - offset.current.x, y: ev.clientY - offset.current.y });
+    };
+    const onUp = () => { dragging.current = false; window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, [pos]);
+
+  const htmlContent = useMemo(() => renderMarkdown(entry.answer), [entry.answer]);
+
+  return (
+    <div
+      data-saved-branch-window
+      className="fixed z-[55] w-72 rounded-xl border border-border bg-card shadow-xl p-3 flex flex-col gap-2"
+      style={{ left: pos.x, top: pos.y }}
+    >
+      <div className="flex items-center gap-1 cursor-move" onMouseDown={onDragStart}>
+        <Move className="h-3 w-3 text-muted-foreground" />
+        <span className="text-xs font-medium text-muted-foreground flex-1">Branch</span>
+        <button onClick={onClose} className="p-0.5 rounded text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors">
+          <X className="h-3 w-3" />
+        </button>
+      </div>
+      <p className="text-xs text-muted-foreground font-medium">{entry.question}</p>
+      {entry.sourceHighlight && (
+        <p className="text-xs text-muted-foreground/70 italic line-clamp-2">"{entry.sourceHighlight}"</p>
+      )}
+      <div className="text-sm text-foreground leading-relaxed md-content overflow-y-auto max-h-[200px]" dangerouslySetInnerHTML={{ __html: htmlContent }} />
     </div>
   );
 }
@@ -283,17 +394,27 @@ function HistoryEntryBlock({ entry, index, onDelete }: { entry: StoredEntry; ind
 }
 
 // ponytail: isolated single-entry view when opened from a sparkle click
-function SingleEntryBlock({ entry }: { entry: StoredEntry }) {
+function SingleEntryBlock({ entry, isContinuation }: { entry: StoredEntry; isContinuation?: boolean }) {
   const htmlContent = useMemo(() => renderMarkdown(entry.answer), [entry.answer]);
   return (
-    <div className="pb-4">
-      <div className="flex items-start gap-1.5 mb-1">
-        {entry.sourceHighlight && <CornerDownRight className="h-3 w-3 text-muted-foreground/60 mt-0.5 shrink-0" />}
-        <p className={`text-xs ${entry.sourceHighlight ? "text-muted-foreground" : "text-muted-foreground/70 font-medium"}`}>
-          {entry.sourceHighlight ? <><span className="italic">"{entry.sourceHighlight}"</span><span className="mx-1">—</span>{entry.question}</> : entry.question}
-        </p>
+    <div className={`relative ${isContinuation ? "pl-4" : "pb-4"}`}>
+      {isContinuation && <div className="absolute left-1.5 top-0 bottom-0 w-px bg-border" />}
+      {isContinuation && (
+        <div className="absolute left-0 top-1.5 w-3 h-3 rounded-full bg-card border-2 border-border z-[1] flex items-center justify-center">
+          <div className="w-1 h-1 rounded-full bg-muted-foreground" />
+        </div>
+      )}
+      <div className="pb-4">
+        <div className="flex items-start gap-1.5 mb-1">
+          {(entry.sourceHighlight || isContinuation) && <CornerDownRight className="h-3 w-3 text-muted-foreground/60 mt-0.5 shrink-0" />}
+          <p className="text-xs text-muted-foreground">
+            {entry.sourceHighlight
+              ? <><span className="italic">"{entry.sourceHighlight}"</span><span className="mx-1">—</span>{entry.question}</>
+              : entry.question}
+          </p>
+        </div>
+        <div className="text-sm text-foreground leading-relaxed md-content cursor-text select-text" dangerouslySetInnerHTML={{ __html: htmlContent }} />
       </div>
-      <div className="text-sm text-foreground leading-relaxed md-content cursor-text select-text" dangerouslySetInnerHTML={{ __html: htmlContent }} />
     </div>
   );
 }
@@ -335,8 +456,11 @@ export default function ClarifyPanel() {
   const [thread, setThread] = useState<ThreadEntry[]>([]);
   const sessionModeRef = useRef<string>("clarify");
   const sessionPageRef = useRef<number>(1);
+  const sessionHighlightRef = useRef<string>("");
   const [context, setContext] = useState("");
   const [customDraft, setCustomDraft] = useState("");
+  const [chatDraft, setChatDraft] = useState("");
+  const [openBranchWindows, setOpenBranchWindows] = useState<Set<string>>(new Set());
   const [activeFollowUpId, setActiveFollowUpId] = useState<string | null>(null);
   const [followUpPos, setFollowUpPos] = useState({ x: 0, y: 0 });
   const [followUpSourceHighlight, setFollowUpSourceHighlight] = useState("");
@@ -346,12 +470,33 @@ export default function ClarifyPanel() {
   const outerRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const entryRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  const singleEntryRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
   const [tick, setTick] = useState(0);
 
   const close = useCallback(() => {
     if (abortRef.current) abortRef.current.abort();
+    setOpenBranchWindows(new Set());
     useAppStore.setState({ clarifyPanelOpen: false, clarifyHighlightText: "", clarifyHighlightRects: [], rightDockWidth: 0, leftDockWidth: 0, clarifyScrollToEntryId: null });
   }, []);
+
+  // Clear branch windows when a different sparkle is clicked
+  useEffect(() => {
+    setOpenBranchWindows(new Set());
+  }, [clarifyScrollToEntryId]);
+
+  // Compute initial position for a branch window based on panel layout
+  const getBranchPos = useCallback((index: number) => {
+    const w = 288; // w-72 = 18rem = 288px
+    const gap = 20;
+    if (docked === "right") {
+      return { x: Math.max(20, window.innerWidth - size.w - w - gap), y: 80 + index * 140 };
+    } else if (docked === "left") {
+      return { x: size.w + gap, y: 80 + index * 140 };
+    } else {
+      return { x: Math.min(window.innerWidth - w - gap, pos.x + size.w + gap), y: pos.y + 80 + index * 140 };
+    }
+  }, [docked, size.w, pos.x, pos.y]);
 
   // Delete the sparkle marker for an entry id, searching all marker keys
   const deleteOrphanedMarker = useCallback((entryId: string) => {
@@ -364,15 +509,16 @@ export default function ClarifyPanel() {
     close();
   }, [aiMarkers, removeAiMarker, close]);
 
-  // Capture mode/page when panel opens so runStream can tag saved entries correctly
+  // Capture mode/page/highlight when panel opens so runStream can tag saved entries correctly
   useEffect(() => {
     if (clarifyPanelOpen) {
       sessionModeRef.current = useAppStore.getState().clarifyMode;
       sessionPageRef.current = useAppStore.getState().currentPage;
+      sessionHighlightRef.current = useAppStore.getState().clarifyHighlightText;
     }
   }, [clarifyPanelOpen]);
 
-  const runStream = useCallback(async (entryId: string, messages: ChatMessage[], meta?: { question: string; sourceHighlight?: string }) => {
+  const runStream = useCallback(async (entryId: string, messages: ChatMessage[], meta?: { question: string; sourceHighlight?: string; skipMarker?: boolean; threadId?: string; isBranch?: boolean }) => {
     const abort = new AbortController();
     abortRef.current = abort;
     setThread((prev) => prev.map((e) => e.id === entryId ? { ...e, status: "loading" } : e));
@@ -403,10 +549,12 @@ export default function ClarifyPanel() {
             mode: sessionModeRef.current,
             page: sessionPageRef.current,
             timestamp: new Date().toISOString(),
+            ...(meta.threadId ? { threadId: meta.threadId } : {}),
+            ...(meta.isBranch ? { isBranch: true } : {}),
           });
-          // Place a sparkle marker on the page at the highlighted rects
+          // Place a sparkle marker on the page at the highlighted rects (skip for chat continuations)
           const rects = s.clarifyHighlightRects;
-          if (rects && rects.length > 0) {
+          if (!meta.skipMarker && rects && rects.length > 0) {
             s.addAiMarker(`${paperPath}-${sessionPageRef.current}`, {
               id: entryId,
               zoom: s.zoom,
@@ -432,11 +580,25 @@ export default function ClarifyPanel() {
 
   useEffect(() => {
     if (!clarifyPanelOpen) {
-      setThread([]); setContext(""); setCustomDraft(""); setActiveFollowUpId(null);
+      setThread([]); setContext(""); setCustomDraft(""); setChatDraft(""); setOpenBranchWindows(new Set()); setActiveFollowUpId(null);
       return;
     }
-    if (useAppStore.getState().clarifyScrollToEntryId) {
-      setThread([]); setContext("");
+    const scrollId = useAppStore.getState().clarifyScrollToEntryId;
+    if (scrollId) {
+      // ponytail: load the saved entry into thread so chat input shows and user can keep chatting
+      const s = useAppStore.getState();
+      const convs = s.conversations;
+      let entry: StoredEntry | null = null;
+      for (const entries of Object.values(convs)) {
+        entry = entries.find((e) => e.id === scrollId) || null;
+        if (entry) break;
+      }
+      if (entry) {
+        setThread([{ id: entry.id, question: entry.question, answer: entry.answer, status: "done", sourceHighlight: entry.sourceHighlight }]);
+      } else {
+        setThread([]);
+      }
+      setContext("");
       return;
     }
     const title = activePaper?.title || "Untitled";
@@ -474,12 +636,12 @@ export default function ClarifyPanel() {
   }, [thread.length, thread[thread.length - 1]?.answer]);
 
   useEffect(() => {
-    if (!activeFollowUpId) return;
+    if (!activeFollowUpId && openBranchWindows.size === 0) return;
     let raf: number;
     const loop = () => { setTick((t) => t + 1); raf = requestAnimationFrame(loop); };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, [activeFollowUpId]);
+  }, [activeFollowUpId, openBranchWindows]);
 
   const handleCustomSend = useCallback(() => {
     if (!customDraft.trim() || thread.length === 0) return;
@@ -497,6 +659,32 @@ export default function ClarifyPanel() {
     runStream(entry.id, messages, { question, sourceHighlight: clarifyHighlightText });
   }, [customDraft, thread, context, activePaper?.title, currentPage, clarifyHighlightText, runStream]);
 
+  const handleChatSend = useCallback(() => {
+    if (!chatDraft.trim()) return;
+    if (thread.some((e) => e.status === "loading")) return;
+    const title = activePaper?.title || "Untitled";
+    const prompt = MODE_PROMPTS[sessionModeRef.current] || MODE_PROMPTS.clarify;
+    const ctxBlock = context ? `\n\nSurrounding context from the paper:\n${context}` : "";
+    const question = chatDraft.trim();
+    const newEntryId = uid();
+    // Build full conversation history so the model has context
+    const messages: ChatMessage[] = [
+      { role: "system", content: prompt.system(title) },
+    ];
+    thread.forEach((e, i) => {
+      if (i === 0) {
+        messages.push({ role: "user", content: `The user highlighted this text on page ${sessionPageRef.current}:\n"${sessionHighlightRef.current}"${ctxBlock}\n\n${e.question}` });
+      } else {
+        messages.push({ role: "user", content: e.question });
+      }
+      if (e.answer) messages.push({ role: "assistant", content: e.answer });
+    });
+    messages.push({ role: "user", content: question });
+    setChatDraft("");
+    setThread((prev) => [...prev, { id: newEntryId, question, answer: "", status: "loading" }]);
+    runStream(newEntryId, messages, { question, sourceHighlight: sessionHighlightRef.current, skipMarker: true, threadId: thread[0]?.id });
+  }, [chatDraft, thread, activePaper?.title, context, runStream]);
+
   const handleAnswerSelect = useCallback((entryId: string, selectedText: string) => {
     const parent = thread.find((e) => e.id === entryId);
     if (!parent) return;
@@ -513,7 +701,7 @@ export default function ClarifyPanel() {
     setActiveFollowUpId(entryId);
   }, [thread]);
 
-  // ponytail: streaming for follow-up window — stays in the floating window, never merges into thread
+  // ponytail: streaming for follow-up window — stays in the floating window, but also saved for revisit
   const streamFollowUp = useCallback(async (
     draft: string,
     onStatus: (s: ThreadEntry["status"], err?: string) => void,
@@ -523,6 +711,7 @@ export default function ClarifyPanel() {
     if (!parentId) return;
     const parent = thread.find((e) => e.id === parentId);
     if (!parent) return;
+    const branchEntryId = uid(); // ponytail: unique id so the branch survives revisit
 
     const title = activePaper?.title || "Untitled";
     const ctxBlock = context ? `\n\nSurrounding context from the paper:\n${context}` : "";
@@ -558,6 +747,22 @@ export default function ClarifyPanel() {
       if (result?.text) accumulator = result.text;
       onAnswer(accumulator);
       onStatus("done");
+      // ponytail: persist the branch so it reappears when revisiting the sparkle
+      const s = useAppStore.getState();
+      const paperPath = s.activePaperPath;
+      if (paperPath) {
+        s.saveConversationEntry(paperPath, {
+          id: branchEntryId,
+          question: draft,
+          answer: accumulator,
+          sourceHighlight: followUpSourceHighlight || parent.answer.slice(0, 200),
+          mode: sessionModeRef.current,
+          page: sessionPageRef.current,
+          timestamp: new Date().toISOString(),
+          threadId: thread[0]?.id || parentId,
+          isBranch: true,
+        });
+      }
       useAppStore.getState().awardXP("follow_up");
     } catch (e: any) {
       if (e.name === "AbortError") return;
@@ -573,26 +778,30 @@ export default function ClarifyPanel() {
     clearInterval(interval);
   }, [thread, context, activePaper?.title, currentPage, clarifyHighlightText, followUpSourceHighlight, llmProvider, llmModel, ollamaEndpoint, opencodeEndpoint, llmTemperature, llmMaxTokens]);
 
-  const arrowFrom = useMemo(() => {
+  // ponytail: arrow from the panel window edge, not the entry element inside it
+  // ponytail: arrow endpoints for live FollowUpWindow — dynamic edges based on relative position
+  const liveArrow = useMemo(() => {
     if (!activeFollowUpId) return null;
-    const parentId = followUpSourceParentId.current;
-    if (!parentId) return null;
-    const entryEl = entryRefs.current.get(parentId);
-    if (!entryEl) return null;
-    const r = entryEl.getBoundingClientRect();
-    const visibleTop = Math.max(r.top, 0);
-    const visibleBottom = Math.min(r.bottom, window.innerHeight);
-    const y = visibleTop + Math.min(visibleBottom - visibleTop, r.height) / 2;
-    return { x: r.right, y: Math.max(12, Math.min(window.innerHeight - 12, y)) };
+    const panelEl = panelRef.current;
+    const winEl = document.querySelector("[data-follow-up-window]") as HTMLElement | null;
+    if (!panelEl || !winEl) return null;
+    const { from, to } = computeArrowEndpoints(panelEl.getBoundingClientRect(), winEl.getBoundingClientRect());
+    return { from, to };
   }, [activeFollowUpId, tick]);
 
-  const arrowTo = useMemo(() => {
-    if (!activeFollowUpId) return null;
-    const winEl = document.querySelector("[data-follow-up-window]") as HTMLElement | null;
-    if (!winEl) return null;
-    const r = winEl.getBoundingClientRect();
-    return { x: r.left, y: r.top + r.height / 2 };
-  }, [activeFollowUpId, tick]);
+  // ponytail: arrows from panel to each open saved-branch window — dynamic edges
+  const branchArrows = useMemo(() => {
+    if (openBranchWindows.size === 0) return [];
+    const panelEl = panelRef.current;
+    if (!panelEl) return [];
+    const panelRect = panelEl.getBoundingClientRect();
+    const arrows: { from: { x: number; y: number }; to: { x: number; y: number } }[] = [];
+    document.querySelectorAll("[data-saved-branch-window]").forEach((win) => {
+      const { from, to } = computeArrowEndpoints(panelRect, win.getBoundingClientRect());
+      arrows.push({ from, to });
+    });
+    return arrows;
+  }, [openBranchWindows, tick]);
 
   useEffect(() => {
     const el = outerRef.current;
@@ -633,6 +842,29 @@ export default function ClarifyPanel() {
     return null;
   }, [clarifyScrollToEntryId, savedConversations, allConversations]);
 
+  // ponytail: split into inline continuations (chat follow-ups) and floating branches (Branch button)
+  const continuations = useMemo(() => {
+    if (!singleEntry) return [];
+    const results: StoredEntry[] = [];
+    for (const entries of Object.values(allConversations)) {
+      for (const entry of entries) {
+        if (entry.threadId === singleEntry.id && !entry.isBranch) results.push(entry);
+      }
+    }
+    return results.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  }, [singleEntry, allConversations]);
+
+  const branchEntries = useMemo(() => {
+    if (!singleEntry) return [];
+    const results: StoredEntry[] = [];
+    for (const entries of Object.values(allConversations)) {
+      for (const entry of entries) {
+        if (entry.threadId === singleEntry.id && entry.isBranch) results.push(entry);
+      }
+    }
+    return results.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  }, [singleEntry, allConversations]);
+
   const isSingleEntryView = !!singleEntry;
   const headerLabel = isSingleEntryView
     ? `${singleEntry.mode.charAt(0).toUpperCase() + singleEntry.mode.slice(1)} · p.${singleEntry.page}`
@@ -647,6 +879,7 @@ export default function ClarifyPanel() {
       <AnimatePresence>
         {clarifyPanelOpen && (
           <motion.div
+            ref={panelRef}
             key="clarify"
             initial={docked ? { height: "100%", opacity: 0 } : { opacity: 0, scale: 0.95 }}
             animate={docked ? { height: "100%", opacity: 1 } : { opacity: 1, scale: 1 }}
@@ -663,6 +896,23 @@ export default function ClarifyPanel() {
               <GripHorizontal className="h-3.5 w-3.5 text-muted-foreground" />
               {(() => { const ModeIcon = isSingleEntryView ? getModeIcon(singleEntry.mode) : getModeIcon(clarifyMode); return <ModeIcon className="h-3.5 w-3.5 text-muted-foreground" />; })()}
               <span className="text-xs font-medium text-foreground flex-1">{headerLabel}</span>
+              {isSingleEntryView && branchEntries.length > 0 && (
+                <button
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (openBranchWindows.size > 0) {
+                      setOpenBranchWindows(new Set());
+                    } else {
+                      setOpenBranchWindows(new Set(branchEntries.map((e) => e.id)));
+                    }
+                  }}
+                  className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors mr-1"
+                >
+                  <CornerDownRight className="h-3 w-3" />
+                  {openBranchWindows.size > 0 ? "Hide" : `${branchEntries.length} branch${branchEntries.length > 1 ? "es" : ""}`}
+                </button>
+              )}
               {isStreaming && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />}
               {isSingleEntryView && activePaperPath && (
                 <button
@@ -719,7 +969,12 @@ export default function ClarifyPanel() {
                     Conversation not found — it may have been deleted or the storage data is missing.
                   </p>
                 ) : isSingleEntryView ? (
-                  <SingleEntryBlock entry={singleEntry} />
+                  <div ref={singleEntryRef} className="flex flex-col">
+                    <SingleEntryBlock entry={singleEntry} />
+                    {continuations.map((entry) => (
+                      <SingleEntryBlock key={entry.id} entry={entry} isContinuation />
+                    ))}
+                  </div>
                 ) : (
                   <>
                     {historyToShow.length > 0 && (
@@ -753,7 +1008,7 @@ export default function ClarifyPanel() {
                   </>
                 )}
               </div>
-              {clarifyMode === "custom" && thread.length > 0 && thread[0].status === "idle" && (
+              {clarifyMode === "custom" && thread.length > 0 && thread[0].status === "idle" ? (
                 <div className="shrink-0 border-t border-border px-4 py-3">
                   <div className="flex flex-col gap-2">
                     <textarea
@@ -768,24 +1023,78 @@ export default function ClarifyPanel() {
                     </button>
                   </div>
                 </div>
-              )}
+              ) : thread.some((e) => e.status === "done") ? (
+                <div className="shrink-0 border-t border-border px-3 py-2">
+                  <div className="flex items-end gap-2">
+                    <textarea
+                      value={chatDraft}
+                      onChange={(e) => setChatDraft(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleChatSend(); } }}
+                      placeholder="Keep chatting..."
+                      rows={1}
+                      className="flex-1 rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground/50 resize-none focus:outline-none focus:ring-1 focus:ring-ring"
+                      style={{ minHeight: "36px", maxHeight: "120px", overflowY: "auto" }}
+                      onInput={(e) => {
+                        const el = e.currentTarget;
+                        el.style.height = "auto";
+                        el.style.height = Math.min(el.scrollHeight, 120) + "px";
+                      }}
+                    />
+                    <button
+                      onClick={handleChatSend}
+                      disabled={!chatDraft.trim() || isStreaming}
+                      className="shrink-0 p-2 rounded-lg bg-foreground text-background disabled:opacity-40 disabled:cursor-not-allowed hover:bg-foreground/90 transition-colors"
+                    >
+                      <ArrowUp className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                </div>
+              ) : null}
             </div>
             {!docked && <div className="absolute right-0 bottom-0 w-4 h-4 cursor-se-resize" onMouseDown={(e) => onResizeMouseDown(e as any, "se")} />}
           </motion.div>
         )}
       </AnimatePresence>
 
+      {(activeFollowUpId || openBranchWindows.size > 0) && createPortal(
+        <svg className="fixed left-0 top-0 pointer-events-none z-[60]" style={{ width: "100vw", height: "100vh" }}>
+          {liveArrow && <Arrow from={liveArrow.from} to={liveArrow.to} />}
+          {branchArrows.map((a, i) => (
+            <Arrow key={`branch-${i}`} from={a.from} to={a.to} />
+          ))}
+        </svg>,
+        document.body,
+      )}
+
       {activeFollowUpId && createPortal(
+        <FollowUpWindow
+          sourceHighlight={followUpSourceHighlight}
+          initialPos={followUpPos}
+          onClose={() => setActiveFollowUpId(null)}
+          streamFollowUp={streamFollowUp}
+        />,
+        document.body,
+      )}
+
+      {branchEntries.length > 0 && createPortal(
         <>
-          <svg className="fixed left-0 top-0 pointer-events-none z-[60]" style={{ width: "100vw", height: "100vh" }}>
-            {arrowFrom && arrowTo && <Arrow from={arrowFrom} to={arrowTo} />}
-          </svg>
-          <FollowUpWindow
-            sourceHighlight={followUpSourceHighlight}
-            initialPos={followUpPos}
-            onClose={() => setActiveFollowUpId(null)}
-            streamFollowUp={streamFollowUp}
-          />
+          {branchEntries.map((entry, i) => {
+            if (!openBranchWindows.has(entry.id)) return null;
+            return (
+              <SavedBranchWindow
+                key={entry.id}
+                entry={entry}
+                initialPos={getBranchPos(i)}
+                onClose={() => {
+                  setOpenBranchWindows((prev) => {
+                    const next = new Set(prev);
+                    next.delete(entry.id);
+                    return next;
+                  });
+                }}
+              />
+            );
+          })}
         </>,
         document.body,
       )}

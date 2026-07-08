@@ -1,10 +1,10 @@
 import { useCallback, useState, useEffect, useMemo } from "react";
-import { v4 as uuidv4 } from "uuid";
-import { Plus, FileText, Trash2, Pencil, X, Sparkles, ChevronDown } from "lucide-react";
+import { Plus, FileText, Trash2, Pencil, X, Sparkles, ChevronDown, User } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import AddPaperModal from "@/components/AddPaperModal";
 import PdfThumbnail from "@/components/PdfThumbnail";
-import { savePdf, deletePdf } from "@/lib/pdfStorage";
+import { deletePdf } from "@/lib/pdfStorage";
+import { addPaperFromBytes } from "@/lib/addPaper";
 import { useAppStore } from "@/store/useAppStore";
 import { ProgressBar } from "@/components/ui/progress-bar";
 import { LEVELS, getXpForNextLevel } from "@/lib/gamification";
@@ -13,43 +13,41 @@ import type { Paper } from "@/types";
 type SortKey = "recent" | "name" | "annotated";
 type Variant = "continue" | "library" | "books";
 
-function XPStrip() {
+function XPBadge() {
   const { xp, level, stats } = useAppStore((s) => s.gamification);
   const levelInfo = LEVELS[level];
   const nextLevelXp = getXpForNextLevel(level);
   const prevLevelXp = LEVELS[level]?.xp ?? 0;
   const range = nextLevelXp - prevLevelXp;
   const progress = range > 0 ? Math.min(100, ((xp - prevLevelXp) / range) * 100) : 100;
-  const isMaxLevel = level >= LEVELS.length - 1;
 
   return (
-    <div className="flex items-center gap-3 px-8 pt-5 pb-1 shrink-0">
-      <div className="flex items-center gap-1.5 shrink-0">
-        <span className="text-[10px] font-medium text-muted-foreground/50 uppercase tracking-wider">
-          {levelInfo.title}
+    <div className="flex items-center gap-2.5">
+      {/* Profile avatar with indigo ring progress */}
+      <div className="relative shrink-0">
+        <svg width="36" height="36" className="-rotate-90">
+          <circle cx="18" cy="18" r="15" fill="none" stroke="currentColor" strokeWidth="2.5" className="text-secondary" />
+          <circle
+            cx="18" cy="18" r="15" fill="none" stroke="currentColor" strokeWidth="2.5"
+            strokeDasharray={`${2 * Math.PI * 15}`}
+            strokeDashoffset={`${2 * Math.PI * 15 * (1 - progress / 100)}`}
+            strokeLinecap="round"
+            className="text-indigo-400 transition-all duration-700 ease-out"
+          />
+        </svg>
+        <div className="absolute inset-0 flex items-center justify-center">
+          <User className="h-4 w-4 text-muted-foreground/60" />
+        </div>
+      </div>
+
+      {/* Level info */}
+      <div className="flex flex-col gap-0.5">
+        <span className="text-sm font-semibold text-foreground leading-none">{levelInfo.title}</span>
+        <span className="text-xs text-muted-foreground/50 tabular-nums leading-none">
+          {xp.toLocaleString()} XP
+          {stats.readingRunDays > 1 && <span className="ml-1.5">🔥 {stats.readingRunDays}d</span>}
         </span>
       </div>
-      <div className="flex-1 flex flex-col gap-0.5">
-        <div className="w-full h-1 bg-secondary rounded-full overflow-hidden">
-          <motion.div
-            className="h-full bg-foreground/20 rounded-full"
-            initial={{ width: 0 }}
-            animate={{ width: `${progress}%` }}
-            transition={{ duration: 0.6, ease: "easeOut" }}
-          />
-        </div>
-        {!isMaxLevel && (
-          <p className="text-[9px] text-muted-foreground/30 tabular-nums">
-            {xp} / {nextLevelXp} XP
-          </p>
-        )}
-      </div>
-      {stats.readingRunDays > 1 && (
-        <div className="shrink-0 flex items-center gap-1 text-[10px] text-orange-400/70">
-          <span>🔥</span>
-          <span>{stats.readingRunDays}d</span>
-        </div>
-      )}
     </div>
   );
 }
@@ -75,8 +73,6 @@ function HomePage({ onOpenPaper, variant = "library" }: { onOpenPaper: () => voi
   const conversations = useAppStore((s) => s.conversations);
   const setActivePaper = useAppStore((s) => s.setActivePaper);
   const setActiveBook = useAppStore((s) => s.setActiveBook);
-  const addPaper = useAppStore((s) => s.addPaper);
-  const addBook = useAppStore((s) => s.addBook);
   const removePaper = useAppStore((s) => s.removePaper);
   const removeBook = useAppStore((s) => s.removeBook);
   const rightDockWidth = useAppStore((s) => s.rightDockWidth);
@@ -128,25 +124,10 @@ function HomePage({ onOpenPaper, variant = "library" }: { onOpenPaper: () => voi
 
   const handleAddPaper = useCallback(
     async (file: File, name: string) => {
-      const id = uuidv4();
       const bytes = new Uint8Array(await file.arrayBuffer());
-      await savePdf(id, bytes);
-      const paper = {
-        id,
-        title: name,
-        filePath: `idb://${id}`,
-        totalPages: 0,
-        lastPage: 1,
-        tags: [],
-        lastOpenedAt: new Date().toISOString(),
-      };
-      if (isBooks) {
-        addBook(paper);
-      } else {
-        addPaper(paper);
-      }
+      await addPaperFromBytes(bytes, name, isBooks);
     },
-    [addPaper, addBook, isBooks],
+    [isBooks],
   );
 
   const handleDelete = useCallback(
@@ -244,14 +225,20 @@ function HomePage({ onOpenPaper, variant = "library" }: { onOpenPaper: () => voi
         marginLeft: leftDockWidth || undefined,
       }}
     >
-      <XPStrip />
       {/* Header */}
-      <div className="flex items-center justify-between px-8 pt-4 pb-4 shrink-0">
+      <div className="flex items-center justify-between px-8 pt-8 pb-4 shrink-0">
         <h2 className="text-sm text-muted-foreground">
           {variant === "continue" ? "Continue Reading" : variant === "books" ? "Your Books" : "Your Papers"} &middot; {papers.length}
         </h2>
-        <div className="relative group/sort">
-          <button className="flex items-center gap-1.5 text-xs text-muted-foreground/60 hover:text-muted-foreground transition-colors">
+        <XPBadge />
+      </div>
+
+      {/* Card grid */}
+      <div className="flex-1 overflow-y-auto px-8 pb-8 pt-1">
+        <div className="min-h-full flex flex-col">
+        {/* Sort — sits right above the cards */}
+        <div className="flex justify-end mb-4 relative group/sort shrink-0">
+          <button className="flex items-center gap-1.5 text-xs text-muted-foreground/50 hover:text-muted-foreground transition-colors">
             <span className="capitalize">{sortKey}</span>
             <ChevronDown className="h-3 w-3" />
           </button>
@@ -269,11 +256,10 @@ function HomePage({ onOpenPaper, variant = "library" }: { onOpenPaper: () => voi
             ))}
           </div>
         </div>
-      </div>
-
-      {/* Card grid */}
-      <div className="flex-1 overflow-y-auto px-8 pb-8 pt-3">
-        <div className="flex flex-wrap gap-6">
+        {/* Vertically centers the row within leftover space when there are
+            only a few cards, instead of dumping all the extra space below. */}
+        <div className="flex-1 flex items-center">
+        <div className="flex flex-wrap gap-6 items-start">
           <AnimatePresence>
             {displayPapers.map((paper, i) => {
               const progressPct = paper.totalPages > 0
@@ -316,8 +302,9 @@ function HomePage({ onOpenPaper, variant = "library" }: { onOpenPaper: () => voi
                       </div>
                     )}
 
-                    {/* Title area */}
-                    <div className="p-3 text-left">
+                    {/* Title area — fixed height so cards align on a shared
+                        baseline regardless of whether the title wraps to 1 or 2 lines */}
+                    <div className="p-3 text-left h-[3.25rem] flex items-start">
                       {editingId === paper.id ? (
                         <input
                           value={editName}
@@ -347,13 +334,16 @@ function HomePage({ onOpenPaper, variant = "library" }: { onOpenPaper: () => voi
                             <span>{relativeTime(paper.lastOpenedAt)}</span>
                           )}
                         </div>
-                        <ProgressBar value={progressPct} />
+                        <ProgressBar value={progressPct} variant="accent" />
                       </div>
                     )}
                   </button>
 
                   {/* Bottom action bar */}
-                  <div className="flex items-center justify-center min-h-[24px]">
+                  {/* Fixed (not min-) height: must never change size when swapping
+                      between the page-count text and the edit/delete icons, or
+                      the card's total height shifts and pushes neighboring cards. */}
+                  <div className="flex items-center justify-center h-10">
                     <AnimatePresence mode="wait">
                       {hoveredId === paper.id ? (
                         <motion.div
@@ -407,6 +397,8 @@ function HomePage({ onOpenPaper, variant = "library" }: { onOpenPaper: () => voi
             </div>
             <span className="text-xs text-muted-foreground/30 group-hover:text-muted-foreground/50 transition-colors">{isBooks ? "add book" : "add paper"}</span>
           </button>
+        </div>
+        </div>
         </div>
       </div>
 

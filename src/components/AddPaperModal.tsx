@@ -6,18 +6,20 @@ type AddPaperModalProps = {
   open: boolean;
   onClose: () => void;
   onAdd: (file: File, name: string) => void;
+  variant?: "paper" | "book";
 };
 
-function AddPaperModal({ open, onClose, onAdd }: AddPaperModalProps) {
+function AddPaperModal({ open, onClose, onAdd, variant = "paper" }: AddPaperModalProps) {
   const [name, setName] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const noun = variant === "book" ? "book" : "paper";
 
   const handleSubmit = useCallback(() => {
     if (!file) return;
-    const paperName = name.trim() || file.name.replace(/\.pdf$/i, "");
-    onAdd(file, paperName);
+    const itemName = name.trim() || file.name.replace(/\.pdf$/i, "");
+    onAdd(file, itemName);
     setName("");
     setFile(null);
     onClose();
@@ -66,18 +68,18 @@ function AddPaperModal({ open, onClose, onAdd }: AddPaperModalProps) {
           <X className="h-4 w-4" />
         </button>
 
-        <h2 className="text-sm font-medium text-foreground mb-5">new paper</h2>
+        <h2 className="text-sm font-medium text-foreground mb-5">new {noun}</h2>
 
         <div className="flex flex-col gap-4">
           <div>
             <label className="text-xs text-muted-foreground mb-1.5 block">
-              paper name?
+              {noun} name?
             </label>
             <input
               type="text"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="My Research Paper"
+              placeholder={variant === "book" ? "My Book" : "My Research Paper"}
               className="w-full px-3 py-2 rounded-lg bg-background border border-border text-sm text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-ring"
               autoFocus
               onKeyDown={(e) => {
@@ -139,7 +141,7 @@ function AddPaperModal({ open, onClose, onAdd }: AddPaperModalProps) {
             disabled={!file}
             className="w-full py-2 rounded-lg bg-foreground text-background text-sm font-medium hover:opacity-90 transition-opacity disabled:opacity-20 disabled:cursor-not-allowed"
           >
-            add paper
+            add {noun}
           </button>
         </div>
       </motion.div>

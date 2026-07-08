@@ -1,72 +1,8 @@
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useRef, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { X, ExternalLink, GripHorizontal, Loader2 } from "lucide-react";
 import { useAppStore } from "@/store/useAppStore";
-
-function useDragMove(initialPos: { x: number; y: number }) {
-  const [pos, setPos] = useState(initialPos);
-  const dragging = useRef(false);
-  const offset = useRef({ x: 0, y: 0 });
-
-  const onMouseDown = useCallback(
-    (e: React.MouseEvent) => {
-      dragging.current = true;
-      offset.current = { x: e.clientX - pos.x, y: e.clientY - pos.y };
-      const onMove = (ev: MouseEvent) => {
-        if (!dragging.current) return;
-        setPos({ x: ev.clientX - offset.current.x, y: ev.clientY - offset.current.y });
-      };
-      const onUp = () => {
-        dragging.current = false;
-        window.removeEventListener("mousemove", onMove);
-        window.removeEventListener("mouseup", onUp);
-      };
-      window.addEventListener("mousemove", onMove);
-      window.addEventListener("mouseup", onUp);
-    },
-    [pos],
-  );
-
-  return { pos, onMouseDown };
-}
-
-function useDragResize(initialSize: { w: number; h: number }) {
-  const [size, setSize] = useState(initialSize);
-  const resizing = useRef(false);
-  const start = useRef({ x: 0, y: 0, w: 0, h: 0 });
-  const edge = useRef<"e" | "s" | "se" | null>(null);
-
-  const onMouseDown = useCallback(
-    (e: React.MouseEvent, dir: "e" | "s" | "se") => {
-      e.stopPropagation();
-      resizing.current = true;
-      edge.current = dir;
-      start.current = { x: e.clientX, y: e.clientY, w: size.w, h: size.h };
-      const onMove = (ev: MouseEvent) => {
-        if (!resizing.current) return;
-        const dx = ev.clientX - start.current.x;
-        const dy = ev.clientY - start.current.y;
-        setSize((s) => {
-          let w = s.w;
-          let h = s.h;
-          if (edge.current === "e" || edge.current === "se") w = Math.max(320, start.current.w + dx);
-          if (edge.current === "s" || edge.current === "se") h = Math.max(280, start.current.h + dy);
-          return { w, h };
-        });
-      };
-      const onUp = () => {
-        resizing.current = false;
-        window.removeEventListener("mousemove", onMove);
-        window.removeEventListener("mouseup", onUp);
-      };
-      window.addEventListener("mousemove", onMove);
-      window.addEventListener("mouseup", onUp);
-    },
-    [size],
-  );
-
-  return { size, onResizeMouseDown: onMouseDown };
-}
+import { useDragMove, useDragResize } from "@/lib/useDragMove";
 
 async function fetchWikimediaImages(query: string): Promise<string[]> {
   const url = `https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrsearch=${encodeURIComponent(query)}&gsrnamespace=6&gsrlimit=30&prop=imageinfo&iiprop=url&iiurlwidth=400&format=json&origin=*`;
@@ -95,14 +31,26 @@ function ImageSearchPanel() {
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const panStart = useRef({ x: 0, y: 0, panX: 0, panY: 0 });
 
-  const { pos, onMouseDown: onDragMouseDown } = useDragMove({
+  const { pos, docked, showHint, onMouseDown: onDragMouseDown } = useDragMove({
     x: Math.max(40, window.innerWidth - 540),
     y: 80,
   });
-  const { size, onResizeMouseDown } = useDragResize({ w: 500, h: 600 });
+  const { size, onResizeMouseDown, onDockResizeMouseDown } = useDragResize({ w: 500, h: 600 });
+
+  // Push content area aside when docked
+  useEffect(() => {
+    if (docked) {
+      useAppStore.setState({
+        rightDockWidth: docked === "right" ? size.w : 0,
+        leftDockWidth: docked === "left" ? size.w : 0,
+      });
+    } else if (imageSearchOpen) {
+      useAppStore.setState({ rightDockWidth: 0, leftDockWidth: 0 });
+    }
+  }, [docked, size.w, imageSearchOpen]);
 
   const close = () => {
-    useAppStore.setState({ imageSearchOpen: false, imageSearchTerm: "" });
+    useAppStore.setState({ imageSearchOpen: false, imageSearchTerm: "", rightDockWidth: 0, leftDockWidth: 0 });
   };
 
   const openYT = () => {
@@ -133,14 +81,36 @@ function ImageSearchPanel() {
 
   return (
     <AnimatePresence>
+      {/* Snap hint overlay */}
+      {showHint && imageSearchOpen && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          className="fixed z-40 pointer-events-none border-2 border-dashed border-ring/40 bg-ring/5"
+          style={
+            showHint === "right"
+              ? { top: 0, right: 0, bottom: 0, width: 420 }
+              : { top: 0, left: 0, bottom: 0, width: 420 }
+          }
+        />
+      )}
       {imageSearchOpen && (
         <motion.div
           initial={{ opacity: 0, scale: 0.95 }}
           animate={{ opacity: 1, scale: 1 }}
           exit={{ opacity: 0, scale: 0.95 }}
           transition={{ duration: 0.15 }}
-          className="fixed z-50 bg-card border border-border rounded-xl shadow-2xl flex flex-col overflow-hidden"
-          style={{ left: pos.x, top: pos.y, width: size.w, height: size.h }}
+          className={`fixed z-50 bg-card border border-border shadow-2xl flex flex-col overflow-hidden ${
+            docked ? "rounded-none" : "rounded-xl"
+          }`}
+          style={
+            docked === "right"
+              ? { top: 0, right: 0, bottom: 0, width: size.w, position: "fixed" as const }
+              : docked === "left"
+                ? { top: 0, left: 0, bottom: 0, width: size.w, position: "fixed" as const }
+                : { left: pos.x, top: pos.y, width: size.w, height: size.h }
+          }
         >
           {/* Title bar */}
           <div
@@ -156,14 +126,14 @@ function ImageSearchPanel() {
             <div className="flex items-center gap-1">
               <button
                 onClick={openYT}
-                className="px-2 py-0.5 rounded text-[11px] text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
+                className="px-2 py-0.5 rounded text-xs text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
                 title="YouTube"
               >
                 YouTube
               </button>
               <button
                 onClick={openGoogle}
-                className="px-2 py-0.5 rounded text-[11px] text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
+                className="px-2 py-0.5 rounded text-xs text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
                 title="Google Images"
               >
                 Google
@@ -214,19 +184,30 @@ function ImageSearchPanel() {
             )}
           </div>
 
-          {/* Resize handles */}
-          <div
-            onMouseDown={(e) => onResizeMouseDown(e, "e")}
-            className="absolute right-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-ring/20"
-          />
-          <div
-            onMouseDown={(e) => onResizeMouseDown(e, "s")}
-            className="absolute left-0 right-0 bottom-0 h-1.5 cursor-ns-resize hover:bg-ring/20"
-          />
-          <div
-            onMouseDown={(e) => onResizeMouseDown(e, "se")}
-            className="absolute right-0 bottom-0 w-3 h-3 cursor-nwse-resize"
-          />
+          {/* Resize handles — hidden when docked, dock-resize strip when docked */}
+          {docked ? (
+            <div
+              onMouseDown={(e) => onDockResizeMouseDown(e, docked)}
+              className={`absolute top-0 bottom-0 w-2 cursor-ew-resize hover:bg-ring/20 z-10 ${
+                docked === "right" ? "left-0" : "right-0"
+              }`}
+            />
+          ) : (
+            <>
+              <div
+                onMouseDown={(e) => onResizeMouseDown(e, "e")}
+                className="absolute right-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-ring/20"
+              />
+              <div
+                onMouseDown={(e) => onResizeMouseDown(e, "s")}
+                className="absolute left-0 right-0 bottom-0 h-1.5 cursor-ns-resize hover:bg-ring/20"
+              />
+              <div
+                onMouseDown={(e) => onResizeMouseDown(e, "se")}
+                className="absolute right-0 bottom-0 w-3 h-3 cursor-nwse-resize"
+              />
+            </>
+          )}
 
           {/* Lightbox */}
           <AnimatePresence>

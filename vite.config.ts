@@ -27,5 +27,27 @@ export default defineConfig(async () => ({
     watch: {
       ignored: ["**/src-tauri/**"],
     },
+    proxy: {
+      "/api/proxy/anthropic": {
+        target: "https://api.anthropic.com",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/proxy\/anthropic/, ""),
+      },
+      "/api/proxy/openai": {
+        target: "https://api.openai.com",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/proxy\/openai/, ""),
+      },
+      "/api/proxy/opencode": {
+        target: "https://opencode.ai",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/proxy\/opencode/, ""),
+      },
+      "/api/proxy/arxiv": {
+        target: "https://export.arxiv.org",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/proxy\/arxiv/, ""),
+      },
+    },
   },
 }));

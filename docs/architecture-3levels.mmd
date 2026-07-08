@@ -1,0 +1,144 @@
+%% flowchart: 3-level architecture diagram for ResearchReader
+%% Level 1: Abstract pipeline (5 nodes)
+%% Level 2: Medium subsystems with connections
+%% Level 3: Detailed components, files, and data flows
+
+flowchart TD
+
+    %% ===== LEVEL 1: ABSTRACT =====
+    subgraph L1["Level 1 — Abstract"]
+        direction LR
+        Input[/"PDF Papers & Text Selections"/]
+        Core["ResearchReader App<br>Local-First · React · Tauri"]
+        LLMs["AI Services<br>Ollama · Anthropic · OpenAI · OpenCode"]
+        Wiki["Wikimedia<br>Commons API"]
+
+        Input --> Core
+        Core --> LLMs
+        Core --> Wiki
+    end
+
+    L1 --> L2
+
+    %% ===== LEVEL 2: MEDIUM =====
+    subgraph L2["Level 2 — Medium: Core Subsystems"]
+        direction TB
+
+        subgraph UI_Shell["UI Layer (React + Tailwind)"]
+            direction LR
+            Sidebar["Sidebar<br>nav & tabs"]
+            Reader["PDF Reader<br>canvas + text layer"]
+            FP["Floating Panels<br>drag/dock/resize"]
+            Pages["Pages<br>Home · Settings"]
+        end
+
+        subgraph StateS["State & Storage"]
+            direction LR
+            Zus["Zustand Store<br>single persistent store"]
+            IDB["IndexedDB<br>PDF binaries"]
+            LS["localStorage<br>settings + annotations"]
+            Crypto["AES-GCM<br>encrypted API keys"]
+        end
+
+        subgraph AIPipe["AI Pipeline"]
+            direction LR
+            Streamer["SSE Stream Parser<br>async generator"]
+            Proxy["Vite Dev Proxy<br>CORS bypass"]
+            Mermaid["Mermaid Extractor<br>from raw reasoning"]
+        end
+
+        UI_Shell --> StateS
+        StateS --> AIPipe
+        UI_Shell --> AIPipe
+    end
+
+    L2 --> L3
+
+    %% ===== LEVEL 3: DETAILED =====
+    subgraph L3["Level 3 — Detailed: Components & Data Flow"]
+
+        subgraph Components["src/components/"]
+            direction TB
+            App_tsx["App.tsx<br>view router"]
+            Reader_tsx["Reader.tsx<br>PDF renderer + doodles"]
+            ClarifyPanel["ClarifyPanel.tsx<br>AI response panel"]
+            HighlightMenu["HighlightMenu.tsx<br>selection toolbar"]
+            DrawingPanel["DrawingPanel.tsx<br>Excalidraw sketchpad"]
+            ImageSearch["ImageSearchPanel.tsx<br>Wikimedia search"]
+            Sidebar_tsx["Sidebar.tsx<br>navigation"]
+            Settings_tsx["SettingsPage.tsx<br>config & API keys"]
+            Home_tsx["HomePage.tsx<br>paper library"]
+            AddModal["AddPaperModal.tsx<br>PDF upload"]
+            ErrBoundary["ErrorBoundary.tsx<br>crash recovery"]
+        end
+
+        subgraph Lib["src/lib/"]
+            direction TB
+            llmStream["llmStream.ts<br>SSE + request builder"]
+            secretStorage["secretStorage.ts<br>AES-GCM encryption"]
+            secureStore["secureStore.ts<br>key get/set/delete"]
+            pdfStorage["pdfStorage.ts<br>IndexedDB wrapper"]
+            pdfContext["pdfContext.ts<br>page text singleton"]
+            useDrag["useDragMove.ts<br>panels drag/dock/resize"]
+            excalidrawApi["excalidrawApi.ts<br>canvas push bridge"]
+            logger["logger.ts<br>named console loggers"]
+            utils["utils.ts<br>cn() classnames"]
+        end
+
+        subgraph StoreTypes["src/store/ & src/types/"]
+            direction TB
+            useAppStore["useAppStore.ts<br>single Zustand store"]
+            types_index["types/index.ts<br>Paper · Annotation · ChatMessage"]
+        end
+
+        %% Data flow arrows between components
+        App_tsx --> Reader_tsx
+        App_tsx --> Home_tsx
+        App_tsx --> Settings_tsx
+        Reader_tsx -- "text selection" --> HighlightMenu
+        HighlightMenu -- "ask AI" --> ClarifyPanel
+        HighlightMenu -- "sketch it" --> DrawingPanel
+        HighlightMenu -- "find images" --> ImageSearch
+        ClarifyPanel -- "push code" --> DrawingPanel
+        Home_tsx -- "add paper" --> AddModal
+
+        %% Store connections
+        Reader_tsx --- useAppStore
+        ClarifyPanel --- useAppStore
+        DrawingPanel --- useAppStore
+        ImageSearch --- useAppStore
+        Settings_tsx --- useAppStore
+        Home_tsx --- useAppStore
+
+        %% Lib connections
+        ClarifyPanel --> llmStream
+        llmStream --> secureStore
+        secureStore --> secretStorage
+        Reader_tsx --> pdfContext
+        Reader_tsx --> pdfStorage
+        Home_tsx --> pdfStorage
+        Settings_tsx --> secureStore
+        DrawingPanel --> excalidrawApi
+        ClarifyPanel --> useDrag
+        DrawingPanel --> useDrag
+        ImageSearch --> useDrag
+
+        %% Types used everywhere
+        useAppStore --- types_index
+    end
+
+    %% ===== STYLING =====
+    classDef trigger fill:#fed7aa,stroke:#c2410c,color:#374151
+    classDef success fill:#a7f3d0,stroke:#047857,color:#374151
+    classDef ai fill:#ddd6fe,stroke:#6d28d9,color:#374151
+    classDef primary fill:#3b82f6,stroke:#1e3a5f,color:#ffffff
+    classDef decision fill:#fef3c7,stroke:#b45309,color:#374151
+    classDef storage fill:#e2e8f0,stroke:#475569,color:#374151
+    classDef component fill:#dbeafe,stroke:#2563eb,color:#374151
+
+    class Input trigger
+    class LLMs,Wiki,Mermaid,Streamer ai
+    class Core primary
+    class Output success
+    class Zus,IDB,LS,Crypto,useAppStore,types_index storage
+    class App_tsx,Reader_tsx,ClarifyPanel,HighlightMenu,DrawingPanel,ImageSearch,Sidebar_tsx,Settings_tsx,Home_tsx,AddModal,ErrBoundary component

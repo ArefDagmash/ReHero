@@ -109,15 +109,24 @@ type AppState = {
 
   llmProvider: LlmProvider;
   llmModel: string;
+  // Remembers the last model used per provider, so switching providers back
+  // and forth doesn't leave a stale model id from a different provider sitting
+  // in `llmModel` (e.g. an OpenCode model name still showing after switching
+  // back to Ollama).
+  llmModelByProvider: Partial<Record<LlmProvider, string>>;
   ollamaEndpoint: string;
   opencodeEndpoint: string;
   llmTemperature: number;
   llmMaxTokens: number;
-  sidebarTab: "home" | "papers" | "books" | "settings";
+  sidebarTab: "home" | "papers" | "books" | "explore" | "settings";
 
   gamification: GamificationState;
   awardXP: (event: string, context?: { mode?: string; paperPath?: string }) => void;
   dismissToast: () => void;
+
+  annotationPanelOpen: boolean;
+  searchOpen: boolean;
+  searchQuery: string;
 
   setBgTheme: (theme: BgTheme) => void;
   setDoodleColor: (color: string) => void;
@@ -136,9 +145,9 @@ type AppState = {
   updatePinnedNote: (key: string, id: string, note: string) => void;
   addAiMarker: (key: string, marker: AiMarker) => void;
   removeAiMarker: (key: string, id: string) => void;
-  addPaper: (paper: Paper) => void;
+  addPaper: (paper: Paper, opts?: { navigate?: boolean }) => void;
   setActivePaper: (path: string | null) => void;
-  addBook: (book: Paper) => void;
+  addBook: (book: Paper, opts?: { navigate?: boolean }) => void;
   setActiveBook: (path: string | null) => void;
   setPage: (page: number) => void;
   setZoom: (zoom: number) => void;
@@ -194,6 +203,7 @@ export const useAppStore = create<AppState>()(
 
       llmProvider: "ollama",
       llmModel: "llama3.2",
+      llmModelByProvider: { ollama: "llama3.2" },
       ollamaEndpoint: "http://localhost:11434",
       opencodeEndpoint: "https://opencode.ai/zen/go/v1",
       llmTemperature: 0.7,
@@ -207,6 +217,10 @@ export const useAppStore = create<AppState>()(
         stats: { ...INITIAL_GAMIFICATION_STATS },
         pendingToasts: [],
       },
+
+      annotationPanelOpen: false,
+      searchOpen: false,
+      searchQuery: "",
 
       awardXP: (event, context) => {
         set((state) => {
@@ -317,24 +331,30 @@ export const useAppStore = create<AppState>()(
         }));
       },
 
-      addPaper: (paper) => {
+      addPaper: (paper, opts) => {
+        const navigate = opts?.navigate ?? true;
         const exists = get().papers.find((p) => p.filePath === paper.filePath);
         set((state) => {
           if (exists) {
             log.store.info("Paper already exists, setting active", { title: paper.title });
-            return { activePaperPath: paper.filePath };
+            return navigate ? { activePaperPath: paper.filePath } : {};
           }
           log.store.info("Adding new paper", { title: paper.title, id: paper.id, totalPapers: state.papers.length + 1 });
-          return { papers: [...state.papers, paper], activePaperPath: paper.filePath };
+          return navigate
+            ? { papers: [...state.papers, paper], activePaperPath: paper.filePath }
+            : { papers: [...state.papers, paper] };
         });
         if (!exists) get().awardXP("add_paper");
       },
 
-      addBook: (book) => {
+      addBook: (book, opts) => {
+        const navigate = opts?.navigate ?? true;
         const exists = get().books.find((b) => b.filePath === book.filePath);
         set((state) => {
-          if (exists) return { activeBookPath: book.filePath };
-          return { books: [...state.books, book], activeBookPath: book.filePath };
+          if (exists) return navigate ? { activeBookPath: book.filePath } : {};
+          return navigate
+            ? { books: [...state.books, book], activeBookPath: book.filePath }
+            : { books: [...state.books, book] };
         });
         if (!exists) get().awardXP("add_paper");
       },
@@ -415,8 +435,14 @@ export const useAppStore = create<AppState>()(
       setStrokeCount: (strokeCount) => set({ strokeCount }),
       setSloppiness: (sloppiness) => set({ sloppiness }),
 
-      setLlmProvider: (llmProvider) => set({ llmProvider }),
-      setLlmModel: (llmModel) => set({ llmModel }),
+      setLlmProvider: (llmProvider) => set((state) => ({
+        llmProvider,
+        llmModel: state.llmModelByProvider[llmProvider] ?? "",
+      })),
+      setLlmModel: (llmModel) => set((state) => ({
+        llmModel,
+        llmModelByProvider: { ...state.llmModelByProvider, [state.llmProvider]: llmModel },
+      })),
       setOllamaEndpoint: (ollamaEndpoint) => set({ ollamaEndpoint }),
       setOpencodeEndpoint: (opencodeEndpoint) => set({ opencodeEndpoint }),
       setLlmTemperature: (llmTemperature) => set({ llmTemperature }),
@@ -634,8 +660,10 @@ export const useAppStore = create<AppState>()(
         bgTheme: state.bgTheme,
         pinnedDoodles: state.pinnedDoodles,
         aiMarkers: state.aiMarkers,
+        conversations: state.conversations,
         llmProvider: state.llmProvider,
         llmModel: state.llmModel,
+        llmModelByProvider: state.llmModelByProvider,
         ollamaEndpoint: state.ollamaEndpoint,
         opencodeEndpoint: state.opencodeEndpoint,
         llmTemperature: state.llmTemperature,
@@ -654,8 +682,11 @@ export const useAppStore = create<AppState>()(
               activePaperPath: (state?.activePaperPath ?? "").slice(0, 60),
             });
             const annotations = loadAnnotations();
-            const conversations = loadConversations();
-            useAppStore.setState({ annotations, conversations });
+            // Migrate conversations from the old separate key if the partialize blob has none yet
+            const rehydratedConvs = useAppStore.getState().conversations;
+            const hasConvs = Object.keys(rehydratedConvs).length > 0;
+            const legacyConvs = hasConvs ? null : loadConversations();
+            useAppStore.setState({ annotations, ...(legacyConvs ? { conversations: legacyConvs } : {}) });
           }
         };
       },

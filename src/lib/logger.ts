@@ -43,4 +43,6 @@ export const log = {
   store: createLogger("store"),
   pdf: createLogger("pdf"),
   ai: createLogger("ai"),
+  narrator: createLogger("narrator"),
+  explore: createLogger("explore"),
 };

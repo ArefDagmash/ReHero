@@ -1,0 +1,10 @@
+flowchart LR
+  A["Input: PDF files, text selections, AI queries, settings"] --> B["App boots → Zustand rehydrates from localStorage"]
+  B --> C["User adds a PDF → bytes in IndexedDB, metadata in store"]
+  C --> D["User opens a paper → PDF rendered to canvas with text layer"]
+  D --> E["User reads pages → doodle overlays, page tracking, XP"]
+  E --> F["User selects text → HighlightMenu offers actions"]
+  F --> G["User asks AI → streamLlm() fetches from provider, typewriter response"]
+  G --> H["AI response saved, sparkle marker placed on page"]
+  H --> I["User generates narration → page text → LLM → Kokoro TTS → MP3"]
+  I --> J["Output: Annotated PDF, AI panel, sketchpad, image search, audio player, exports"]

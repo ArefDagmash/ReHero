@@ -6,6 +6,7 @@ import {
   ZoomOut,
   PanelRight,
   Menu,
+  Pencil,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAppStore } from "@/store/useAppStore";
@@ -73,67 +74,90 @@ function Toolbar({
     };
   }, [goNext, goPrev]);
 
+  const progressPct = activePaperPath && totalPages > 0
+    ? Math.round((currentPage / totalPages) * 100)
+    : 0;
+
   return (
-    <div className="h-12 border-b flex items-center justify-between px-3 shrink-0 bg-background select-none">
-      <div className="flex items-center gap-1">
-        <Button variant="ghost" size="icon" onClick={onToggleLibrary}>
-          <Menu className="h-4 w-4" />
-        </Button>
+    <div className="shrink-0">
+      <div className="h-12 border-b flex items-center justify-between px-3 bg-background select-none">
+        <div className="flex items-center gap-1">
+          <Button variant="ghost" size="icon" onClick={onToggleLibrary}>
+            <Menu className="h-4 w-4" />
+          </Button>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={goPrev}
+            disabled={currentPage <= 1 || !activePaperPath}
+          >
+            <ChevronLeft className="h-4 w-4" />
+          </Button>
+          <span className="text-sm tabular-nums min-w-[80px] text-center">
+            {activePaperPath ? `${currentPage} / ${totalPages}` : "—"}
+          </span>
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={goNext}
+            disabled={currentPage >= totalPages || !activePaperPath}
+          >
+            <ChevronRight className="h-4 w-4" />
+          </Button>
+        </div>
+
+        <div className="flex items-center gap-1">
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={zoomOut}
+            disabled={zoom <= 0.5 || !activePaperPath}
+          >
+            <ZoomOut className="h-4 w-4" />
+          </Button>
+          <span className="text-xs text-muted-foreground min-w-[48px] text-center tabular-nums">
+            {Math.round(zoom * 100)}%
+          </span>
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={zoomIn}
+            disabled={zoom >= 3.0 || !activePaperPath}
+          >
+            <ZoomIn className="h-4 w-4" />
+          </Button>
+        </div>
+
+        <div className="flex items-center gap-1">
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => useAppStore.setState({ drawingOpen: true })}
+            title="Sketchpad"
+          >
+            <Pencil className="h-4 w-4" />
+          </Button>
+          <Button
+            variant={annotationsOpen ? "secondary" : "ghost"}
+            size="icon"
+            onClick={onToggleAnnotations}
+          >
+            <PanelRight className="h-4 w-4" />
+          </Button>
+        </div>
       </div>
 
-      <div className="flex items-center gap-2">
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={goPrev}
-          disabled={currentPage <= 1 || !activePaperPath}
-        >
-          <ChevronLeft className="h-4 w-4" />
-        </Button>
-        <span className="text-sm tabular-nums min-w-[80px] text-center">
-          {activePaperPath ? `${currentPage} / ${totalPages}` : "—"}
-        </span>
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={goNext}
-          disabled={currentPage >= totalPages || !activePaperPath}
-        >
-          <ChevronRight className="h-4 w-4" />
-        </Button>
-      </div>
-
-      <div className="flex items-center gap-1">
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={zoomOut}
-          disabled={zoom <= 0.5 || !activePaperPath}
-        >
-          <ZoomOut className="h-4 w-4" />
-        </Button>
-        <span className="text-xs text-muted-foreground min-w-[48px] text-center tabular-nums">
-          {Math.round(zoom * 100)}%
-        </span>
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={zoomIn}
-          disabled={zoom >= 3.0 || !activePaperPath}
-        >
-          <ZoomIn className="h-4 w-4" />
-        </Button>
-      </div>
-
-      <div className="flex items-center gap-1">
-        <Button
-          variant={annotationsOpen ? "secondary" : "ghost"}
-          size="icon"
-          onClick={onToggleAnnotations}
-        >
-          <PanelRight className="h-4 w-4" />
-        </Button>
-      </div>
+      {activePaperPath && totalPages > 0 && (
+        <div className="h-1 w-full bg-secondary overflow-hidden">
+          <div
+            className="h-full bg-foreground transition-[width] duration-300 ease-out"
+            style={{ width: `${progressPct}%` }}
+          />
+        </div>
+      )}
     </div>
   );
 }

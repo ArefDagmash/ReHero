@@ -30,6 +30,8 @@ export type StoredEntry = {
   mode: string;
   page: number;
   timestamp: string;
+  threadId?: string; // set on continuation entries; points to the root entry's id
+  isBranch?: boolean; // true for entries created via the floating Branch button
 };
 
 export type AchievementId =

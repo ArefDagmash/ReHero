@@ -3,11 +3,17 @@ import * as pdfjsLib from "pdfjs-dist";
 import pdfjsWorker from "pdfjs-dist/build/pdf.worker.mjs?url";
 import { motion, AnimatePresence } from "framer-motion";
 import rough from "roughjs";
-import { Home, ChevronLeft, ChevronRight, Minus, Plus, Settings2 } from "lucide-react";
+import { ChevronLeft, ChevronRight, Minus, Plus, Settings2, Pencil, Sparkles, Volume2, Loader2, X, MessageSquareText } from "lucide-react";
 import { loadPdf as loadPdfFromIdb } from "@/lib/pdfStorage";
 import { useAppStore } from "@/store/useAppStore";
 import { log } from "@/lib/logger";
 import { Skeleton } from "@/components/ui/skeleton";
+import { ProgressBar } from "@/components/ui/progress-bar";
+import { setPdfDoc as setPdfDocCtx, clearPdfDoc as clearPdfDocCtx, getPageText } from "@/lib/pdfContext";
+import { streamLlm } from "@/lib/llmStream";
+import { buildNarrationMessages, synthesizeSpeechBlob, playAudioBlob, stopSpeaking } from "@/lib/narrator";
+import { saveNarration, loadNarration, deleteNarration, savePlaybackPosition, loadPlaybackPosition, type SavedNarration } from "@/lib/narrationStorage";
+import MiniAudioPlayer from "@/components/MiniAudioPlayer";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
 
@@ -36,11 +42,38 @@ async function loadPdfBytes(key: string): Promise<Uint8Array | null> {
 
 const LOAD_TIMEOUT_MS = 30_000;
 
-type ReaderProps = {
-  onBack: () => void;
-};
+function formatEta(seconds: number): string {
+  if (seconds < 60) return `~${seconds}s left`;
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `~${m}m ${s}s left`;
+}
 
-function Reader({ onBack }: ReaderProps) {
+// Kokoro synthesis is one single request (no per-chunk progress to time), so
+// its ETA is based on a chars/sec throughput rate that self-calibrates from
+// actual runs and persists across sessions in localStorage.
+const TTS_RATE_STORAGE_KEY = "narration-tts-chars-per-sec";
+const DEFAULT_TTS_CHARS_PER_SEC = 600;
+
+function loadTtsCharsPerSec(): number {
+  try {
+    const raw = localStorage.getItem(TTS_RATE_STORAGE_KEY);
+    const n = raw ? parseFloat(raw) : NaN;
+    return isFinite(n) && n > 0 ? n : DEFAULT_TTS_CHARS_PER_SEC;
+  } catch {
+    return DEFAULT_TTS_CHARS_PER_SEC;
+  }
+}
+
+function saveTtsCharsPerSec(rate: number): void {
+  try {
+    localStorage.setItem(TTS_RATE_STORAGE_KEY, String(rate));
+  } catch {}
+}
+
+type ReaderProps = {};
+
+function Reader(_props: ReaderProps) {
   const activePaperPath = useAppStore((s) => s.activePaperPath);
   const currentPage = useAppStore((s) => s.currentPage);
   const zoom = useAppStore((s) => s.zoom);
@@ -61,8 +94,14 @@ function Reader({ onBack }: ReaderProps) {
   const pinnedDoodles = useAppStore((s) => s.pinnedDoodles);
   const removePinnedDoodle = useAppStore((s) => s.removePinnedDoodle);
   const updatePinnedNote = useAppStore((s) => s.updatePinnedNote);
+  const aiMarkers = useAppStore((s) => s.aiMarkers);
+  const rightDockWidth = useAppStore((s) => s.rightDockWidth);
+  const leftDockWidth = useAppStore((s) => s.leftDockWidth);
+  const clarifyPanelOpen = useAppStore((s) => s.clarifyPanelOpen);
+  const clarifyHighlightRects = useAppStore((s) => s.clarifyHighlightRects);
   const activePaper = useAppStore((s) =>
-    s.papers.find((p) => p.filePath === s.activePaperPath),
+    s.papers.find((p) => p.filePath === s.activePaperPath) ??
+    s.books.find((b) => b.filePath === s.activePaperPath),
   );
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -83,6 +122,19 @@ function Reader({ onBack }: ReaderProps) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [editNoteId, setEditNoteId] = useState<string | null>(null);
   const [editNoteText, setEditNoteText] = useState("");
+  const [narrateStatus, setNarrateStatus] = useState<"idle" | "selecting" | "extracting" | "generating" | "synthesizing" | "playing" | "error">("idle");
+  const [narrateError, setNarrateError] = useState<string | null>(null);
+  const [narrateStartPage, setNarrateStartPage] = useState(currentPage);
+  const [narrateEndPage, setNarrateEndPage] = useState(currentPage);
+  const [estimatedTokens, setEstimatedTokens] = useState<number | null>(null);
+  const [narrateProgress, setNarrateProgress] = useState<{ current: number; total: number; etaSeconds?: number } | null>(null);
+  const [narrateReadingPage, setNarrateReadingPage] = useState<number | null>(null);
+  const [savedNarration, setSavedNarration] = useState<SavedNarration | null>(null);
+  const [narrateSynthEta, setNarrateSynthEta] = useState<number | null>(null);
+  const narrateAudioRef = useRef<HTMLAudioElement | null>(null);
+  const pageBoundariesRef = useRef<{ page: number; startFrac: number }[]>([]);
+  const ttsRateRef = useRef<number | null>(null);
+  if (ttsRateRef.current === null) ttsRateRef.current = loadTtsCharsPerSec();
 
   const totalPages = activePaper?.totalPages ?? 0;
 
@@ -92,6 +144,7 @@ function Reader({ onBack }: ReaderProps) {
       setDocLoading(true);
       setError(null);
       setPdfDoc(null);
+      clearPdfDocCtx();
 
       const timeoutId = setTimeout(() => {
         if (activeLoadKeyRef.current === key) {
@@ -115,6 +168,7 @@ function Reader({ onBack }: ReaderProps) {
           return;
         }
         setPdfDoc(doc);
+        setPdfDocCtx(doc, doc.numPages);
         updatePaperTotalPages(key, doc.numPages);
       } catch (e: any) {
         setError(`Failed to load PDF: ${e?.message ?? "Unknown error"}`);
@@ -132,6 +186,7 @@ function Reader({ onBack }: ReaderProps) {
     } else {
       activeLoadKeyRef.current = null;
       setPdfDoc(null);
+      clearPdfDocCtx();
       setError(null);
       setDocLoading(false);
     }
@@ -223,6 +278,244 @@ function Reader({ onBack }: ReaderProps) {
 
   const zoomIn = useCallback(() => setZoom(Math.min(zoom + 0.25, 3.0)), [zoom, setZoom]);
   const zoomOut = useCallback(() => setZoom(Math.max(zoom - 0.25, 0.5)), [zoom, setZoom]);
+
+  const openRangePicker = useCallback(() => {
+    if (narrateStatus === "playing" || narrateStatus === "synthesizing") {
+      stopSpeaking(); setNarrateStatus("idle"); narrateAudioRef.current = null; setNarrateReadingPage(null); return;
+    }
+    if (narrateStatus !== "idle" && narrateStatus !== "error") return;
+    setNarrateError(null);
+    setNarrateStartPage(currentPage);
+    setNarrateEndPage(currentPage);
+    setNarrateStatus("selecting");
+  }, [narrateStatus, currentPage]);
+
+  const updateReadingPage = useCallback((audio: HTMLAudioElement) => {
+    const boundaries = pageBoundariesRef.current;
+    if (!boundaries.length || !isFinite(audio.duration) || audio.duration === 0) return;
+    const frac = audio.currentTime / audio.duration;
+    let current = boundaries[0].page;
+    for (const b of boundaries) {
+      if (frac >= b.startFrac) current = b.page;
+      else break;
+    }
+    setNarrateReadingPage(current);
+  }, []);
+
+  const wireUpAudio = useCallback((audio: HTMLAudioElement, boundaries: { page: number; startFrac: number }[]) => {
+    pageBoundariesRef.current = boundaries;
+    narrateAudioRef.current = audio;
+    audio.onplay = () => setNarrateStatus("playing");
+    audio.onended = () => {
+      setNarrateStatus("idle");
+      narrateAudioRef.current = null;
+      setNarrateReadingPage(null);
+      // Finished listening — next resume should start from the top.
+      if (activePaperPath) savePlaybackPosition(activePaperPath, 0).catch(() => {});
+    };
+    audio.onerror = () => {
+      setNarrateError("Audio playback failed.");
+      setNarrateStatus("error");
+      narrateAudioRef.current = null;
+      setNarrateReadingPage(null);
+    };
+    let lastSavedAt = -Infinity;
+    audio.addEventListener("timeupdate", () => {
+      updateReadingPage(audio);
+      if (!activePaperPath) return;
+      const t = audio.currentTime;
+      if (Math.abs(t - lastSavedAt) >= 5) {
+        lastSavedAt = t;
+        savePlaybackPosition(activePaperPath, t).catch(() => {});
+      }
+    });
+    audio.addEventListener("pause", () => {
+      if (activePaperPath && !audio.ended) savePlaybackPosition(activePaperPath, audio.currentTime).catch(() => {});
+    });
+  }, [updateReadingPage, activePaperPath]);
+
+  const resumeSavedNarration = useCallback(async () => {
+    if (!savedNarration || !activePaperPath) return;
+    const position = await loadPlaybackPosition(activePaperPath).catch(() => null);
+    const audio = playAudioBlob(savedNarration.audioBlob, position ?? 0);
+    wireUpAudio(audio, savedNarration.pageBoundaries);
+  }, [savedNarration, activePaperPath, wireUpAudio]);
+
+  const discardSavedNarration = useCallback(async () => {
+    if (!activePaperPath) return;
+    setSavedNarration(null);
+    await deleteNarration(activePaperPath).catch((e) => log.reader.error("narration: failed to delete saved narration", e));
+  }, [activePaperPath]);
+
+  // Reset narration playback and pick up any saved narration when switching papers.
+  useEffect(() => {
+    stopSpeaking();
+    narrateAudioRef.current = null;
+    setNarrateStatus("idle");
+    setNarrateReadingPage(null);
+    setSavedNarration(null);
+    if (!activePaperPath) return;
+    let cancelled = false;
+    loadNarration(activePaperPath)
+      .then((rec) => { if (!cancelled) setSavedNarration(rec); })
+      .catch((e) => log.reader.error("narration: failed to load saved narration", e));
+    return () => { cancelled = true; };
+  }, [activePaperPath]);
+
+  const startNarrate = useCallback(async (from: number, to: number) => {
+    setNarrateError(null);
+    setNarrateStatus("extracting");
+    setNarrateProgress(null);
+    try {
+      const pages: { num: number; text: string }[] = [];
+      for (let p = from; p <= to; p++) {
+        const text = await getPageText(p);
+        if (text.trim()) pages.push({ num: p, text });
+      }
+      log.reader.info("narration: extracted pages", { from, to, pageCount: pages.length });
+
+      if (pages.length === 0) {
+        setNarrateError("No text found in selected pages.");
+        setNarrateStatus("error");
+        return;
+      }
+
+      // Narrate one page at a time so each LLM call's input/output stays small and
+      // bounded — avoids relying on num_ctx tricks to fit an entire multi-page
+      // paper (and the model's own context window) into a single call.
+      setNarrateStatus("generating");
+      const config = {
+        provider: useAppStore.getState().llmProvider,
+        model: useAppStore.getState().llmModel,
+        ollamaEndpoint: useAppStore.getState().ollamaEndpoint,
+        opencodeEndpoint: useAppStore.getState().opencodeEndpoint,
+        temperature: useAppStore.getState().llmTemperature,
+        maxTokens: useAppStore.getState().llmMaxTokens,
+      };
+
+      let combinedNarration = "";
+      let previousTail = "";
+      const pageDurationsMs: number[] = [];
+      const charBoundaries: { page: number; charStart: number }[] = [];
+
+      let currentPageIndex = 0;
+      let currentPageStart = performance.now();
+
+      // Ticks every second so the ETA counts down live during a page's
+      // generation, not just jumps at page boundaries.
+      const updateEta = () => {
+        const avgMs = pageDurationsMs.length > 0
+          ? pageDurationsMs.reduce((a, b) => a + b, 0) / pageDurationsMs.length
+          : undefined;
+        const elapsedCurrent = performance.now() - currentPageStart;
+        const pagesAfterCurrent = pages.length - (currentPageIndex + 1);
+        const etaMs = avgMs != null
+          ? Math.max(0, avgMs - elapsedCurrent) + avgMs * pagesAfterCurrent
+          : undefined;
+        setNarrateProgress({
+          current: currentPageIndex + 1,
+          total: pages.length,
+          etaSeconds: etaMs != null ? Math.round(etaMs / 1000) : undefined,
+        });
+      };
+      const tickInterval = setInterval(updateEta, 1000);
+
+      try {
+        for (let i = 0; i < pages.length; i++) {
+          const { num, text } = pages[i];
+          currentPageIndex = i;
+          currentPageStart = performance.now();
+          updateEta();
+
+          const messages = buildNarrationMessages(
+            `${activePaper?.title ?? "Research Paper"} (page ${num})`,
+            text,
+            previousTail,
+          );
+          // num_ctx only needs to cover this one page's input plus this call's own
+          // output budget — not the whole paper.
+          const inputCtx = Math.round(text.length / 4) + config.maxTokens;
+          log.reader.info("narration: streaming LLM for page", { page: num, provider: config.provider, model: config.model, inputLen: text.length, inputCtx });
+
+          let pageNarration = "";
+          for await (const chunk of streamLlm(messages, { ...config, inputCtx })) {
+            pageNarration += chunk;
+          }
+          pageDurationsMs.push(performance.now() - currentPageStart);
+          if (!pageNarration.trim()) {
+            throw new Error(`LLM returned empty response for page ${num}.`);
+          }
+
+          const separator = combinedNarration ? "\n\n" : "";
+          charBoundaries.push({ page: num, charStart: combinedNarration.length + separator.length });
+          combinedNarration += separator + pageNarration.trim();
+          previousTail = pageNarration.trim().slice(-300);
+        }
+      } finally {
+        clearInterval(tickInterval);
+      }
+      log.reader.info("narration: all pages narrated", { responseLen: combinedNarration.length });
+
+      const totalChars = combinedNarration.length || 1;
+      const pageBoundaries = charBoundaries.map((b) => ({ page: b.page, startFrac: b.charStart / totalChars }));
+
+      setNarrateStatus("synthesizing");
+      setNarrateProgress(null);
+      log.reader.info("narration: sending to Kokoro TTS");
+
+      const estimatedSynthSeconds = Math.max(1, Math.round(combinedNarration.length / (ttsRateRef.current ?? DEFAULT_TTS_CHARS_PER_SEC)));
+      setNarrateSynthEta(estimatedSynthSeconds);
+      const synthStart = performance.now();
+      const synthInterval = setInterval(() => {
+        const elapsed = (performance.now() - synthStart) / 1000;
+        setNarrateSynthEta(Math.max(0, Math.round(estimatedSynthSeconds - elapsed)));
+      }, 1000);
+
+      let audioBlob: Blob;
+      try {
+        audioBlob = await synthesizeSpeechBlob(combinedNarration);
+      } finally {
+        clearInterval(synthInterval);
+        setNarrateSynthEta(null);
+      }
+
+      const actualSynthSeconds = (performance.now() - synthStart) / 1000;
+      const measuredRate = combinedNarration.length / actualSynthSeconds;
+      const nextRate = (ttsRateRef.current ?? DEFAULT_TTS_CHARS_PER_SEC) * 0.5 + measuredRate * 0.5;
+      ttsRateRef.current = nextRate;
+      saveTtsCharsPerSec(nextRate);
+
+      const audio = playAudioBlob(audioBlob);
+      wireUpAudio(audio, pageBoundaries);
+
+      if (activePaperPath) {
+        saveNarration({ paperPath: activePaperPath, from, to, audioBlob, pageBoundaries, createdAt: Date.now() })
+          .then(() => setSavedNarration({ paperPath: activePaperPath, from, to, audioBlob, pageBoundaries, createdAt: Date.now() }))
+          .catch((e) => log.reader.error("narration: failed to save narration", e));
+      }
+    } catch (e: any) {
+      log.reader.error("Narrate failed", e);
+      setNarrateError(e?.message ?? "Narration failed.");
+      setNarrateStatus("error");
+      narrateAudioRef.current = null;
+      setNarrateProgress(null);
+      setNarrateSynthEta(null);
+    }
+  }, [activePaper, activePaperPath, wireUpAudio]);
+
+  // Estimate tokens when selecting a range
+  useEffect(() => {
+    if (narrateStatus !== "selecting") { setEstimatedTokens(null); return; }
+    let cancelled = false;
+    (async () => {
+      const text = await getPageText(narrateStartPage);
+      if (cancelled) return;
+      const avgChars = text.length || 500;
+      const pageCount = narrateEndPage - narrateStartPage + 1;
+      setEstimatedTokens(Math.round(avgChars * pageCount / 4));
+    })();
+    return () => { cancelled = true; };
+  }, [narrateStatus, narrateStartPage, narrateEndPage]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = bgTheme;
@@ -366,9 +659,10 @@ function Reader({ onBack }: ReaderProps) {
     }
   }, [doodleRects, pinnedDoodles, activePaperPath, currentPage, zoom, skeletonDimensions, sloppiness, doodleColor, doodleStyle, strokeCount]);
 
-  const handleMouseUp = useCallback(() => {
+  const handleContextMenu = useCallback((e: React.MouseEvent) => {
     const selection = window.getSelection();
     if (!selection || selection.toString().trim().length === 0) return;
+    e.preventDefault();
     const text = selection.toString().trim();
     const rects = selection.getRangeAt(0).getClientRects();
     const firstRect = rects[0];
@@ -387,13 +681,19 @@ function Reader({ onBack }: ReaderProps) {
   }, [activePaperPath]);
 
   const pinnedKey = `${activePaperPath}-${currentPage}`;
-  const showSvg = doodleRects.length > 0 || (pinnedDoodles[pinnedKey] || []).length > 0;
+  const showSvg = doodleRects.length > 0 || (pinnedDoodles[pinnedKey] || []).length > 0 || (aiMarkers[pinnedKey] || []).length > 0;
 
   // --- Render ---
 
   if (!activePaperPath) {
     return (
-      <div className="flex-1 flex items-center justify-center bg-background">
+      <div
+        className="flex-1 flex items-center justify-center bg-background transition-[margin] duration-150"
+        style={{
+          marginRight: rightDockWidth || undefined,
+          marginLeft: leftDockWidth || undefined,
+        }}
+      >
         <div className="flex flex-col items-center gap-3 text-muted-foreground">
           <svg
             xmlns="http://www.w3.org/2000/svg"
@@ -417,22 +717,184 @@ function Reader({ onBack }: ReaderProps) {
   }
 
   return (
-    <div className="flex-1 flex flex-col bg-background overflow-hidden">
+    <div
+      className="flex-1 flex flex-col bg-background overflow-hidden transition-[margin] duration-150"
+      style={{
+        marginRight: rightDockWidth || undefined,
+        marginLeft: leftDockWidth || undefined,
+      }}
+    >
       {/* Slim top bar */}
       <div className="h-12 flex items-center justify-between px-3 shrink-0 select-none relative">
-        <button
-          onClick={onBack}
-          className="p-1.5 rounded-md text-muted-foreground hover:text-foreground transition-colors"
-          aria-label="Home"
-        >
-          <Home className="h-7 w-7" />
-        </button>
+        <div />
 
-        <span className="text-sm text-muted-foreground tabular-nums font-medium">
+        <span className="text-sm text-muted-foreground tabular-nums font-medium absolute left-1/2 -translate-x-1/2">
           {currentPage} / {totalPages}
         </span>
 
         <div className="flex items-center gap-1">
+          <AnimatePresence mode="wait">
+            {narrateStatus === "selecting" ? (
+              <motion.div
+                key="selector"
+                initial={{ width: 0, opacity: 0 }}
+                animate={{ width: "auto", opacity: 1 }}
+                exit={{ width: 0, opacity: 0 }}
+                transition={{ duration: 0.2, ease: "easeOut" }}
+                className="flex items-center gap-1.5 px-2 py-1.5 rounded-lg bg-secondary text-sm overflow-hidden whitespace-nowrap"
+              >
+                <button
+                  onClick={() => setNarrateStatus("idle")}
+                  className="p-0.5 rounded hover:bg-muted transition-colors shrink-0"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+                <span className="text-muted-foreground text-xs shrink-0">from</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={totalPages}
+                  value={narrateStartPage}
+                  onChange={(e) => setNarrateStartPage(Math.max(1, Math.min(totalPages, Number(e.target.value) || 1)))}
+                  className="w-12 h-6 px-1 text-xs text-center rounded border border-border bg-background tabular-nums [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                />
+                <span className="text-muted-foreground text-xs shrink-0">to</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={totalPages}
+                  value={narrateEndPage}
+                  onChange={(e) => setNarrateEndPage(Math.max(1, Math.min(totalPages, Number(e.target.value) || 1)))}
+                  className="w-12 h-6 px-1 text-xs text-center rounded border border-border bg-background tabular-nums [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                />
+                <button
+                  onClick={() => { setNarrateStartPage(1); setNarrateEndPage(totalPages); }}
+                  className="px-2 py-0.5 text-xs rounded bg-muted hover:bg-border transition-colors shrink-0"
+                >
+                  entire
+                </button>
+                {estimatedTokens !== null && (
+                  <span
+                    className={`text-xs shrink-0 ${
+                      estimatedTokens > 16000 ? "text-red-500"
+                      : estimatedTokens > 8000 ? "text-orange-500"
+                      : estimatedTokens > 4000 ? "text-yellow-500"
+                      : "text-green-500"
+                    }`}
+                  >
+                    ~{estimatedTokens.toLocaleString()}t
+                  </span>
+                )}
+                <button
+                  onClick={() => startNarrate(narrateStartPage, narrateEndPage)}
+                  className="px-2 py-0.5 text-xs rounded bg-indigo-500 text-white hover:bg-indigo-600 transition-colors shrink-0"
+                >
+                  Generate
+                </button>
+              </motion.div>
+            ) : narrateStatus === "playing" && narrateAudioRef.current ? (
+              <motion.div
+                key="player"
+                initial={{ width: 0, opacity: 0 }}
+                animate={{ width: "auto", opacity: 1 }}
+                exit={{ width: 0, opacity: 0 }}
+                transition={{ duration: 0.2, ease: "easeOut" }}
+                className="flex items-center gap-1.5"
+              >
+                {narrateReadingPage !== null && (
+                  <span className="text-xs text-muted-foreground shrink-0 tabular-nums">
+                    Page {narrateReadingPage}
+                  </span>
+                )}
+                <MiniAudioPlayer
+                  audio={narrateAudioRef.current}
+                  onStop={() => {
+                    stopSpeaking();
+                    setNarrateStatus("idle");
+                    narrateAudioRef.current = null;
+                    setNarrateReadingPage(null);
+                  }}
+                />
+              </motion.div>
+            ) : narrateStatus === "idle" && savedNarration ? (
+              <motion.div
+                key="saved"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.15 }}
+                className="flex items-center gap-1"
+              >
+                <button
+                  onClick={resumeSavedNarration}
+                  title={`Play saved narration (pages ${savedNarration.from}–${savedNarration.to})`}
+                  className="flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-sm text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
+                >
+                  <Volume2 className="h-4 w-4" />
+                  <span className="hidden sm:inline">Resume {savedNarration.from}–{savedNarration.to}</span>
+                </button>
+                <button
+                  onClick={openRangePicker}
+                  title="Narrate a different range"
+                  className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  onClick={discardSavedNarration}
+                  title="Discard saved narration"
+                  className="p-1 rounded hover:bg-secondary transition-colors"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </motion.div>
+            ) : (
+              <motion.div
+                key="button"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.15 }}
+              >
+                <button
+                  onClick={openRangePicker}
+                  disabled={narrateStatus === "extracting" || narrateStatus === "generating" || narrateStatus === "synthesizing"}
+                  className={`flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-sm transition-colors ${
+                    narrateStatus === "error"
+                      ? "text-red-500 bg-red-500/10"
+                      : narrateStatus === "generating" || narrateStatus === "extracting" || narrateStatus === "synthesizing"
+                        ? "text-muted-foreground bg-secondary"
+                        : "text-muted-foreground hover:text-foreground hover:bg-secondary"
+                  }`}
+                  title={narrateStatus === "error" ? narrateError ?? "Error" : "Narrate"}
+                >
+                  {narrateStatus === "generating" || narrateStatus === "extracting" || narrateStatus === "synthesizing" ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Volume2 className="h-4 w-4" />
+                  )}
+                  <span className="hidden sm:inline">
+                    {narrateStatus === "extracting" ? "Reading..."
+                    : narrateStatus === "generating" ? (
+                        narrateProgress
+                          ? `Narrating ${narrateProgress.current}/${narrateProgress.total}${narrateProgress.etaSeconds != null ? ` · ${formatEta(narrateProgress.etaSeconds)}` : ""}`
+                          : "Narrating..."
+                      )
+                    : narrateStatus === "synthesizing" ? (
+                        narrateSynthEta != null
+                          ? (narrateSynthEta > 0 ? `Synthesizing · ${formatEta(narrateSynthEta)}` : "Almost done...")
+                          : "Synthesizing..."
+                      )
+                    : narrateStatus === "error" ? "Retry"
+                    : "Narrate"}
+                  </span>
+                </button>
+                {narrateStatus === "error" && narrateError && (
+                  <span className="text-xs text-red-500 max-w-[200px] truncate ml-1">{narrateError}</span>
+                )}
+              </motion.div>
+            )}
+          </AnimatePresence>
           <button
             onClick={zoomOut}
             disabled={zoom <= 0.5}
@@ -448,6 +910,22 @@ function Reader({ onBack }: ReaderProps) {
             aria-label="Zoom in"
           >
             <Plus className="h-4 w-4" />
+          </button>
+
+          <button
+            onClick={() => useAppStore.setState({ drawingOpen: true, drawingStartDocked: true })}
+            className="p-1.5 ml-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
+            title="Sketchpad"
+          >
+            <Pencil className="h-4 w-4" />
+          </button>
+
+          <button
+            onClick={() => useAppStore.setState({ annotationPanelOpen: true })}
+            className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
+            title="Notes"
+          >
+            <MessageSquareText className="h-4 w-4" />
           </button>
 
           <div className="relative ml-1">
@@ -606,11 +1084,16 @@ function Reader({ onBack }: ReaderProps) {
         </div>
       </div>
 
+      {/* Reading progress */}
+      {totalPages > 0 && (
+        <ProgressBar value={(currentPage / totalPages) * 100} className="shrink-0 rounded-none" variant="accent" />
+      )}
+
       {/* Canvas area */}
       <div
         ref={containerRef}
         className="flex-1 overflow-auto scrollbar-thin"
-        onMouseUp={handleMouseUp}
+        onContextMenu={handleContextMenu}
       >
         {error && !pdfDoc && (
           <div className="flex h-full items-center justify-center">
@@ -672,6 +1155,23 @@ function Reader({ onBack }: ReaderProps) {
                 >
                   <canvas ref={canvasRef} className="block" />
                   <div ref={textLayerRef} className="pdf-text-layer" />
+                  {/* ponytail: persistent highlight while AI panel is open */}
+                  {clarifyPanelOpen && clarifyHighlightRects.length > 0 && (
+                    <div className="absolute inset-0 pointer-events-none z-[5]">
+                      {clarifyHighlightRects.map((r, i) => (
+                        <div
+                          key={i}
+                          className="absolute bg-yellow-300/40 mix-blend-multiply"
+                          style={{
+                            left: `${r.x}px`,
+                            top: `${r.y}px`,
+                            width: `${r.w}px`,
+                            height: `${r.h}px`,
+                          }}
+                        />
+                      ))}
+                    </div>
+                  )}
                   {showSvg && (
                     <svg
                       ref={doodleSvgRef}
@@ -685,10 +1185,16 @@ function Reader({ onBack }: ReaderProps) {
                   {(pinnedDoodles[pinnedKey] || []).map((d) => {
                     const scale = d.zoom > 0 ? zoom / d.zoom : 1;
                     const validRects = d.rects.filter((r) => r.h > 0);
-                    const anchor = validRects[validRects.length - 1];
-                    if (!anchor) return null;
-                    const fy = anchor.y * scale;
-                    const fh = anchor.h * scale;
+                    if (validRects.length === 0) return null;
+                    const n = validRects.length;
+                    const midY =
+                      n % 2 === 1
+                        ? (validRects[Math.floor(n / 2)].y +
+                            validRects[Math.floor(n / 2)].h / 2) *
+                          scale
+                        : ((validRects[n / 2 - 1].y + validRects[n / 2 - 1].h / 2) * scale +
+                            (validRects[n / 2].y + validRects[n / 2].h / 2) * scale) /
+                          2;
                     const hasNote = d.note.trim().length > 0;
                     return (
                       <div key={d.id}>
@@ -706,7 +1212,7 @@ function Reader({ onBack }: ReaderProps) {
                           className="absolute z-20 transition-all hover:scale-110"
                           style={{
                             left: 4,
-                            top: fy + fh - 15,
+                            top: midY - 14,
                             width: 28,
                             height: 28,
                           }}
@@ -721,7 +1227,7 @@ function Reader({ onBack }: ReaderProps) {
                         {editNoteId === d.id && (
                           <div
                             className="absolute z-30 bg-popover border border-border rounded-lg shadow-lg p-2 w-48"
-                            style={{ left: 36, top: fy + fh - 18 }}
+                            style={{ left: 36, top: midY - 16 }}
                             onMouseDown={(e) => e.stopPropagation()}
                           >
                             <textarea
@@ -740,7 +1246,7 @@ function Reader({ onBack }: ReaderProps) {
                             <div className="flex justify-between items-center mt-1">
                               <button
                                 onClick={() => removePinnedDoodle(pinnedKey, d.id)}
-                                className="text-[10px] text-muted-foreground hover:text-red-500 transition-colors"
+                                className="text-xs text-muted-foreground hover:text-red-500 transition-colors"
                               >
                                 remove
                               </button>
@@ -749,7 +1255,7 @@ function Reader({ onBack }: ReaderProps) {
                                   updatePinnedNote(pinnedKey, d.id, editNoteText);
                                   setEditNoteId(null);
                                 }}
-                                className="text-[10px] text-foreground hover:underline"
+                                className="text-xs text-foreground hover:underline"
                               >
                                 done
                               </button>
@@ -759,6 +1265,62 @@ function Reader({ onBack }: ReaderProps) {
                       </div>
                     );
                   })}
+                  {/* ponytail: sparkle marker, click to open ClarifyPanel scrolled to matching history entry */}
+                  {(() => {
+                    // Best estimate of the text column's right edge: take the widest right edge
+                    // from any multi-line marker on this page (multi-line selections span full lines
+                    // so their max right naturally lands at the column boundary). Fall back to the
+                    // page width when no multi-line markers exist yet.
+                    const multiLineRightX = (aiMarkers[pinnedKey] || []).reduce((mx, marker) => {
+                      const s = marker.zoom > 0 ? zoom / marker.zoom : 1;
+                      const rects = marker.rects.filter((r) => r.h > 0);
+                      if (rects.length < 2) return mx;
+                      const first = rects[0], last = rects[rects.length - 1];
+                      if ((last.y - first.y) * s < first.h * s * 1.5) return mx; // skip single-line markers
+                      return Math.max(mx, ...rects.map((r) => (r.x + r.w) * s));
+                    }, 0);
+                    const columnRightX = multiLineRightX > 0 ? multiLineRightX : (skeletonDimensions?.width ?? 0);
+                    return (aiMarkers[pinnedKey] || []).map((m) => {
+                    const scale = m.zoom > 0 ? zoom / m.zoom : 1;
+                    const validRects = m.rects.filter((r) => r.h > 0);
+                    if (validRects.length === 0) return null;
+                    const n = validRects.length;
+                    const midY =
+                      n % 2 === 1
+                        ? (validRects[Math.floor(n / 2)].y + validRects[Math.floor(n / 2)].h / 2) * scale
+                        : ((validRects[n / 2 - 1].y + validRects[n / 2 - 1].h / 2) * scale +
+                            (validRects[n / 2].y + validRects[n / 2].h / 2) * scale) / 2;
+                    const selectionRightX = Math.max(...validRects.map((r) => (r.x + r.w) * scale));
+                    const isSingleLine = n === 1 || (validRects[n - 1].y - validRects[0].y) * scale < validRects[0].h * scale * 1.5;
+                    const rightX = isSingleLine ? Math.max(selectionRightX, columnRightX) : selectionRightX;
+                    return (
+                      <button
+                        key={m.id}
+                        title="View AI conversation"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          const scale = m.zoom > 0 ? zoom / m.zoom : 1;
+                          useAppStore.setState({
+                            clarifyPanelOpen: true,
+                            clarifyScrollToEntryId: m.id,
+                            clarifyHighlightRects: m.rects.map((r) => ({
+                              x: r.x * scale,
+                              y: r.y * scale,
+                              w: r.w * scale,
+                              h: r.h * scale,
+                            })),
+                            clarifyHighlightText: m.text || "",
+                            clarifyMode: "clarify",
+                          });
+                        }}
+                        className="absolute z-20 opacity-60 hover:opacity-100 transition-opacity cursor-pointer"
+                        style={{ left: rightX + 6, top: midY - 8 }}
+                      >
+                        <Sparkles className="w-4 h-4 text-indigo-400" />
+                      </button>
+                    );
+                    });
+                  })()}
                 </div>
               </motion.div>
             </AnimatePresence>
