@@ -48,6 +48,11 @@ export default defineConfig(async () => ({
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api\/proxy\/arxiv/, ""),
       },
+      "/api/proxy/doab": {
+        target: "https://directory.doabooks.org",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/proxy\/doab/, ""),
+      },
     },
   },
 }));

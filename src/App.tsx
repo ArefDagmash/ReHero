@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import Reader from "@/components/Reader";
 import HomePage from "@/components/HomePage";
 import ExplorePage from "@/components/ExplorePage";
+import AchievementsPage from "@/components/AchievementsPage";
 import LandingPage from "@/components/LandingPage";
 import SettingsPage from "@/components/SettingsPage";
 import HighlightMenu from "@/components/HighlightMenu";
@@ -13,8 +14,9 @@ import SearchPanel from "@/components/SearchPanel";
 import Sidebar from "@/components/Sidebar";
 import XPToast from "@/components/XPToast";
 import { useAppStore } from "@/store/useAppStore";
+import { indexLibraryInBackground } from "@/lib/paperTextIndex";
 
-type View = "home" | "papers" | "books" | "explore" | "settings" | "reader";
+type View = "home" | "papers" | "books" | "explore" | "achievements" | "settings" | "reader";
 
 function App() {
   const sidebarTab = useAppStore((s) => s.sidebarTab);
@@ -23,9 +25,27 @@ function App() {
   const paperCount = useAppStore((s) => s.papers.length);
   const bookCount = useAppStore((s) => s.books.length);
   const isEmpty = paperCount === 0 && bookCount === 0;
+  const bgTheme = useAppStore((s) => s.bgTheme);
 
+  // Applied here (always mounted) rather than per-page — it used to live
+  // in a useEffect duplicated across Reader/HomePage/SettingsPage, so
+  // landing directly on any page without that effect (e.g. Explore or
+  // Achievements, or a refresh that restores straight into one of them)
+  // never set the theme attribute at all, silently falling back to the
+  // browser default (light).
   useEffect(() => {
-    useAppStore.setState({ sidebarTab: "home", activePaperPath: null, activeBookPath: null });
+    document.documentElement.dataset.theme = bgTheme;
+  }, [bgTheme]);
+
+  // One-time catch-up scan (mainly for papers added before full-text search
+  // existed — new adds index themselves via addPaper.ts) — delayed so it
+  // doesn't compete with the initial render/paint.
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      const { papers, books } = useAppStore.getState();
+      indexLibraryInBackground([...papers, ...books]);
+    }, 3000);
+    return () => clearTimeout(timer);
   }, []);
 
   useEffect(() => {
@@ -65,6 +85,7 @@ function App() {
           {view === "papers" && <HomePage variant="library" onOpenPaper={() => {}} />}
           {view === "books" && <HomePage variant="books" onOpenPaper={() => {}} />}
           {view === "explore" && <ExplorePage />}
+          {view === "achievements" && <AchievementsPage />}
           {view === "settings" && <SettingsPage />}
           {view === "reader" && <Reader />}
         </div>

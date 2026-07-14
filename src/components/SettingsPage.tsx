@@ -1,7 +1,6 @@
 import { useState, useEffect } from "react";
 import { useAppStore } from "@/store/useAppStore";
 import { getKey, setKey, deleteKey } from "@/lib/secureStore";
-import { ACHIEVEMENT_DEFS, LEVELS, getXpForNextLevel, RARITY_COLORS } from "@/lib/gamification";
 import LlmModelPicker from "@/components/LlmModelPicker";
 
 function SettingGroup({ title, children }: { title: string; children: React.ReactNode }) {
@@ -34,10 +33,6 @@ function SettingsPage() {
   const setZoom = useAppStore((s) => s.setZoom);
   const rightDockWidth = useAppStore((s) => s.rightDockWidth);
   const leftDockWidth = useAppStore((s) => s.leftDockWidth);
-
-  useEffect(() => {
-    document.documentElement.dataset.theme = bgTheme;
-  }, [bgTheme]);
 
   const [apiKey, setApiKeyInput] = useState("");
   const [savedApiKey, setSavedApiKey] = useState<string | null>(null);
@@ -321,91 +316,6 @@ function SettingsPage() {
               </button>
             </div>
           </SettingGroup>
-
-          {/* Scholar XP */}
-          <SettingGroup title="Scholar XP">
-            <ScholarXPPanel />
-          </SettingGroup>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function ScholarXPPanel() {
-  const { xp, level, achievements, stats } = useAppStore((s) => s.gamification);
-  const levelInfo = LEVELS[level];
-  const nextLevelXp = getXpForNextLevel(level);
-  const prevLevelXp = LEVELS[level]?.xp ?? 0;
-  const range = nextLevelXp - prevLevelXp;
-  const progress = range > 0 ? Math.min(100, ((xp - prevLevelXp) / range) * 100) : 100;
-  const isMaxLevel = level >= LEVELS.length - 1;
-  const unlockedIds = new Set(achievements.map((a) => a.id));
-
-  return (
-    <div className="flex flex-col gap-4">
-      {/* Level + XP bar */}
-      <div className="flex flex-col gap-1.5">
-        <div className="flex items-center justify-between">
-          <div>
-            <span className="text-sm font-medium text-foreground">{levelInfo.title}</span>
-            <span className="text-xs text-muted-foreground/50 ml-2 italic">{levelInfo.flavor}</span>
-          </div>
-          <span className="text-xs text-muted-foreground tabular-nums">
-            {xp.toLocaleString()} XP
-          </span>
-        </div>
-        <div className="w-full h-1.5 bg-secondary rounded-full overflow-hidden">
-          <div
-            className="h-full bg-foreground/30 rounded-full transition-all duration-500"
-            style={{ width: `${progress}%` }}
-          />
-        </div>
-        {!isMaxLevel && (
-          <p className="text-[10px] text-muted-foreground/40">
-            {nextLevelXp - xp} XP until {LEVELS[level + 1]?.title}
-          </p>
-        )}
-      </div>
-
-      {/* Stats row */}
-      <div className="grid grid-cols-3 gap-2 text-center">
-        {[
-          { label: "Pages read", value: stats.totalPagesRead },
-          { label: "AI queries", value: stats.totalAiQueries },
-          { label: "Annotations", value: stats.totalAnnotations },
-        ].map(({ label, value }) => (
-          <div key={label} className="bg-secondary/50 rounded-lg py-2 px-3">
-            <p className="text-sm font-semibold text-foreground tabular-nums">{value.toLocaleString()}</p>
-            <p className="text-[10px] text-muted-foreground/60">{label}</p>
-          </div>
-        ))}
-      </div>
-
-      {/* Achievements grid */}
-      <div>
-        <p className="text-[10px] font-medium text-muted-foreground/50 uppercase tracking-wider mb-2">
-          Achievements · {achievements.length}/{ACHIEVEMENT_DEFS.length}
-        </p>
-        <div className="grid grid-cols-3 gap-2">
-          {ACHIEVEMENT_DEFS.map((def) => {
-            const unlocked = unlockedIds.has(def.id);
-            const isSecret = def.secret && !unlocked;
-            return (
-              <div
-                key={def.id}
-                title={isSecret ? "???" : `${def.name} — ${def.description}`}
-                className={`flex flex-col items-center gap-1 rounded-lg border py-2.5 px-2 text-center transition-opacity ${
-                  unlocked ? "border-border bg-card" : "border-border/30 bg-secondary/20 opacity-40"
-                }`}
-              >
-                <span className="text-lg leading-none">{isSecret ? "🔒" : def.icon}</span>
-                <span className={`text-[10px] font-medium leading-tight ${unlocked ? RARITY_COLORS[def.rarity] : "text-muted-foreground/40"}`}>
-                  {isSecret ? "???" : def.name}
-                </span>
-              </div>
-            );
-          })}
         </div>
       </div>
     </div>

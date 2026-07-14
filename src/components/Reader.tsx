@@ -75,6 +75,7 @@ type ReaderProps = {};
 
 function Reader(_props: ReaderProps) {
   const activePaperPath = useAppStore((s) => s.activePaperPath);
+  const autoResumeNarration = useAppStore((s) => s.autoResumeNarration);
   const currentPage = useAppStore((s) => s.currentPage);
   const zoom = useAppStore((s) => s.zoom);
   const bgTheme = useAppStore((s) => s.bgTheme);
@@ -290,9 +291,9 @@ function Reader(_props: ReaderProps) {
     setNarrateStatus("selecting");
   }, [narrateStatus, currentPage]);
 
-  const updateReadingPage = useCallback((audio: HTMLAudioElement) => {
+  const updateReadingPage = useCallback((audio: HTMLAudioElement): number | null => {
     const boundaries = pageBoundariesRef.current;
-    if (!boundaries.length || !isFinite(audio.duration) || audio.duration === 0) return;
+    if (!boundaries.length || !isFinite(audio.duration) || audio.duration === 0) return null;
     const frac = audio.currentTime / audio.duration;
     let current = boundaries[0].page;
     for (const b of boundaries) {
@@ -300,6 +301,7 @@ function Reader(_props: ReaderProps) {
       else break;
     }
     setNarrateReadingPage(current);
+    return current;
   }, []);
 
   const wireUpAudio = useCallback((audio: HTMLAudioElement, boundaries: { page: number; startFrac: number }[]) => {
@@ -311,7 +313,7 @@ function Reader(_props: ReaderProps) {
       narrateAudioRef.current = null;
       setNarrateReadingPage(null);
       // Finished listening — next resume should start from the top.
-      if (activePaperPath) savePlaybackPosition(activePaperPath, 0).catch(() => {});
+      if (activePaperPath) savePlaybackPosition(activePaperPath, 0, boundaries[0]?.page ?? null).catch(() => {});
     };
     audio.onerror = () => {
       setNarrateError("Audio playback failed.");
@@ -321,25 +323,37 @@ function Reader(_props: ReaderProps) {
     };
     let lastSavedAt = -Infinity;
     audio.addEventListener("timeupdate", () => {
-      updateReadingPage(audio);
+      const page = updateReadingPage(audio);
       if (!activePaperPath) return;
       const t = audio.currentTime;
       if (Math.abs(t - lastSavedAt) >= 5) {
         lastSavedAt = t;
-        savePlaybackPosition(activePaperPath, t).catch(() => {});
+        savePlaybackPosition(activePaperPath, t, page).catch(() => {});
       }
     });
     audio.addEventListener("pause", () => {
-      if (activePaperPath && !audio.ended) savePlaybackPosition(activePaperPath, audio.currentTime).catch(() => {});
+      if (activePaperPath && !audio.ended) {
+        const page = updateReadingPage(audio);
+        savePlaybackPosition(activePaperPath, audio.currentTime, page).catch(() => {});
+      }
     });
   }, [updateReadingPage, activePaperPath]);
 
   const resumeSavedNarration = useCallback(async () => {
     if (!savedNarration || !activePaperPath) return;
-    const position = await loadPlaybackPosition(activePaperPath).catch(() => null);
-    const audio = playAudioBlob(savedNarration.audioBlob, position ?? 0);
+    const progress = await loadPlaybackPosition(activePaperPath).catch(() => null);
+    const audio = playAudioBlob(savedNarration.audioBlob, progress?.positionSeconds ?? 0);
     wireUpAudio(audio, savedNarration.pageBoundaries);
   }, [savedNarration, activePaperPath, wireUpAudio]);
+
+  // One-shot: Home's "Continue Listening" sets autoResumeNarration before
+  // navigating here so a single click there starts playback immediately,
+  // instead of landing on the "Resume" button and needing a second click.
+  useEffect(() => {
+    if (!autoResumeNarration || !savedNarration) return;
+    useAppStore.setState({ autoResumeNarration: false });
+    resumeSavedNarration();
+  }, [autoResumeNarration, savedNarration, resumeSavedNarration]);
 
   const discardSavedNarration = useCallback(async () => {
     if (!activePaperPath) return;
@@ -516,10 +530,6 @@ function Reader(_props: ReaderProps) {
     })();
     return () => { cancelled = true; };
   }, [narrateStatus, narrateStartPage, narrateEndPage]);
-
-  useEffect(() => {
-    document.documentElement.dataset.theme = bgTheme;
-  }, [bgTheme]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -913,7 +923,7 @@ function Reader(_props: ReaderProps) {
           </button>
 
           <button
-            onClick={() => useAppStore.setState({ drawingOpen: true, drawingStartDocked: true })}
+            onClick={() => useAppStore.setState({ drawingOpen: true })}
             className="p-1.5 ml-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
             title="Sketchpad"
           >

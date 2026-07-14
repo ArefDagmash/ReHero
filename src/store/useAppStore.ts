@@ -88,8 +88,16 @@ type AppState = {
   imageSearchTerm: string;
   imageSearchOpen: boolean;
   drawingOpen: boolean;
-  drawingStartDocked: boolean;
   pendingSketchText: string | null;
+  // One-shot signal set right before navigating to the Reader from Home's
+  // "Continue Listening" — Reader picks it up once the paper's saved
+  // narration finishes loading, resumes playback, then clears it.
+  autoResumeNarration: boolean;
+  // Bumped each time paperTextIndex.ts finishes extracting a new paper's
+  // full text in the background — SearchPanel includes it in its search
+  // useMemo's deps purely to re-trigger the (synchronous, in-memory) search
+  // as more papers become searchable, without making the search itself async.
+  paperTextIndexVersion: number;
   rightDockWidth: number;
   leftDockWidth: number;
   clarifyPanelOpen: boolean;
@@ -118,7 +126,7 @@ type AppState = {
   opencodeEndpoint: string;
   llmTemperature: number;
   llmMaxTokens: number;
-  sidebarTab: "home" | "papers" | "books" | "explore" | "settings";
+  sidebarTab: "home" | "papers" | "books" | "explore" | "achievements" | "settings";
 
   gamification: GamificationState;
   awardXP: (event: string, context?: { mode?: string; paperPath?: string }) => void;
@@ -139,7 +147,7 @@ type AppState = {
   setOpencodeEndpoint: (endpoint: string) => void;
   setLlmTemperature: (temperature: number) => void;
   setLlmMaxTokens: (maxTokens: number) => void;
-  setSidebarTab: (tab: "home" | "papers" | "books" | "settings") => void;
+  setSidebarTab: (tab: "home" | "papers" | "books" | "explore" | "achievements" | "settings") => void;
   addPinnedDoodle: (key: string, doodle: PinnedDoodle) => void;
   removePinnedDoodle: (key: string, id: string) => void;
   updatePinnedNote: (key: string, id: string, note: string) => void;
@@ -182,8 +190,9 @@ export const useAppStore = create<AppState>()(
       imageSearchTerm: "",
       imageSearchOpen: false,
       drawingOpen: false,
-      drawingStartDocked: false,
       pendingSketchText: null,
+      autoResumeNarration: false,
+      paperTextIndexVersion: 0,
       rightDockWidth: 0,
       leftDockWidth: 0,
       clarifyPanelOpen: false,

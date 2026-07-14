@@ -279,11 +279,49 @@ with no re-fetching.
 ### Phase 4 — Stretch / optional
 
 - [ ] Curated category quick-select chips instead of free-text-only genre
-- [ ] LLM query rewriting (natural language intent → arXiv search syntax)
-      for better recall on vague queries
+      (mostly superseded by the General/Detailed toggle from Phase 2's
+      "also added" work — skipped)
+- [x] LLM query rewriting (natural language intent → arXiv search syntax)
+      for better recall on vague queries. `src/lib/queryRewriter.ts`,
+      `rewriteQuery()`. Verified live and by direct curl that arXiv's `all:`
+      field ORs space-separated words together rather than ANDing or
+      phrase-matching them (`all:diffusion model` echoes back as
+      `all:diffusion OR all:model`) — so the *previous* behavior of wrapping
+      a whole free-text sentence in one `all:` clause matched almost
+      anything sharing a single common word with the description. Fix:
+      extract 2-3 short key phrases, AND them together as separate quoted
+      `all:"phrase"` clauses (verified quoted phrases match as exact phrases
+      and AND genuinely narrows results). Short inputs (<5 words) skip the
+      LLM round trip entirely.
+      **Caught in live testing before shipping:** AND-ing multiple *exact*
+      phrases is brittle — a small local model (qwen2.5:3b) produced
+      3-word compound phrases like "hierarchical object detection" that
+      basically never appear verbatim, returning zero results even after
+      tightening the prompt to prefer 1-2 word canonical terms and capping
+      at 2-3 phrases. Added a safety net in `ExplorePage.tsx`: if the
+      phrase-AND search returns 0 results, silently retry with the old raw
+      keyword search rather than leaving the user stuck at zero. Both paths
+      verified live (a clean rewrite: `"diffusion models" AND "image super
+      resolution"` → 20 results, shown to the user via a "Searched arXiv
+      for: ..." line; and a bad rewrite → automatic fallback → 20 results
+      with no error surfaced).
 - [ ] Distinct XP event for "discovered via Explore" vs. manual upload
       (small addition to `awardXP`'s switch in `useAppStore.ts`)
-- [ ] Save/revisit past Explore searches
+- [x] Save/revisit past Explore searches. `useExploreStore.ts` gained
+      `persist` middleware (previously fully in-memory) with a `partialize`
+      that saves *only* `searchHistory` — every other Explore field stays
+      in-memory-only as before. `recordSearchHistory()`/
+      `removeSearchHistoryEntry()` dedup by query+category and cap at 8
+      entries. Shown as clickable chips above the results with an
+      on-hover remove button. Verified live: searched twice, reloaded the
+      page, both entries were still there, and clicking the older chip
+      correctly re-ran *that* search — this caught a real staleness bug
+      first (clicking a chip called `setState` then `handleSearch()` in the
+      same tick, before React re-rendered the component's reactive
+      `query`/`categoryMode`/`category` selectors, so `handleSearch` would
+      have used the stale previous values) — fixed by having `handleSearch`
+      read fresh values via `useExploreStore.getState()` instead of the
+      component's selectors, same pattern `handleLoadMore` already used.
 
 ## Data source notes
 

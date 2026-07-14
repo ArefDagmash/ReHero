@@ -1,6 +1,7 @@
 import { streamLlm } from "@/lib/llmStream";
 import { useAppStore } from "@/store/useAppStore";
 import { log } from "@/lib/logger";
+import { extractJsonArray } from "@/lib/jsonExtract";
 import type { ChatMessage } from "@/types";
 import type { ArxivPaper } from "@/lib/arxiv";
 
@@ -36,38 +37,6 @@ function buildBatchMessages(intent: string, batch: ArxivPaper[]): ChatMessage[] 
     { role: "system", content: SYSTEM_PROMPT },
     { role: "user", content: `What I'm looking for: ${intent}\n\nCandidate papers:\n${list}` },
   ];
-}
-
-// LLMs reliably wrap JSON in prose/code fences even when told not to (see
-// docs/graph-mode-json-display-issue.md) — search for the array rather than
-// assuming the whole response is clean JSON.
-function extractJsonArray(text: string): unknown[] | null {
-  try {
-    const parsed = JSON.parse(text.trim());
-    if (Array.isArray(parsed)) return parsed;
-  } catch {
-    // fall through to the bracket scan below
-  }
-
-  const start = text.indexOf("[");
-  if (start === -1) return null;
-
-  let depth = 0;
-  for (let i = start; i < text.length; i++) {
-    if (text[i] === "[") depth++;
-    else if (text[i] === "]") {
-      depth--;
-      if (depth === 0) {
-        try {
-          const parsed = JSON.parse(text.slice(start, i + 1));
-          return Array.isArray(parsed) ? parsed : null;
-        } catch {
-          return null;
-        }
-      }
-    }
-  }
-  return null;
 }
 
 function chunk<T>(arr: T[], size: number): T[][] {

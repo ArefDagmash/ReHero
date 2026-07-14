@@ -1,13 +1,25 @@
 import { useMemo, useCallback, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Search, FileText, MessageSquareText, Sparkles, CornerDownRight } from "lucide-react";
+import { Search, FileText, MessageSquareText, Sparkles, CornerDownRight, BookOpenText } from "lucide-react";
 import { useAppStore } from "@/store/useAppStore";
+import { getCachedPagesSync } from "@/lib/paperTextIndex";
 import type { Paper, Annotation, StoredEntry } from "@/types";
 
 type SearchResult =
   | { type: "paper"; paper: Paper; match: string }
   | { type: "annotation"; paper?: Paper; annotation: Annotation; match: string }
-  | { type: "conversation"; paper?: Paper; entry: StoredEntry; match: string };
+  | { type: "conversation"; paper?: Paper; entry: StoredEntry; match: string }
+  | { type: "content"; paper: Paper; pageNumber: number; match: string };
+
+// Short window of text around the first match, so results read like a
+// normal search-engine snippet instead of a full page dump.
+function buildSnippet(pageText: string, query: string): string {
+  const idx = pageText.toLowerCase().indexOf(query);
+  if (idx === -1) return pageText.slice(0, 100);
+  const start = Math.max(0, idx - 40);
+  const end = Math.min(pageText.length, idx + query.length + 60);
+  return `${start > 0 ? "…" : ""}${pageText.slice(start, end)}${end < pageText.length ? "…" : ""}`;
+}
 
 function SearchPanel() {
   const searchOpen = useAppStore((s) => s.searchOpen);
@@ -18,6 +30,10 @@ function SearchPanel() {
   const conversations = useAppStore((s) => s.conversations);
   const setActivePaper = useAppStore((s) => s.setActivePaper);
   const setPage = useAppStore((s) => s.setPage);
+  // Not read directly — included so the search recomputes as background
+  // indexing (paperTextIndex.ts) finishes more papers over time, without
+  // making the search itself async.
+  const paperTextIndexVersion = useAppStore((s) => s.paperTextIndexVersion);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -62,14 +78,26 @@ function SearchPanel() {
       }
     }
 
+    // Full-text — only searches papers paperTextIndex.ts has already
+    // finished indexing (best-effort background job); one hit per paper
+    // (the first matching page) rather than every page it appears on.
+    for (const p of allPapers) {
+      const pages = getCachedPagesSync(p.filePath);
+      if (!pages) continue;
+      const pageIdx = pages.findIndex((text) => text.toLowerCase().includes(q));
+      if (pageIdx === -1) continue;
+      res.push({ type: "content", paper: p, pageNumber: pageIdx + 1, match: buildSnippet(pages[pageIdx], q) });
+    }
+
     return res.slice(0, 20);
-  }, [searchQuery, allPapers, annotations, conversations]);
+  }, [searchQuery, allPapers, annotations, conversations, paperTextIndexVersion]);
 
   const grouped = useMemo(() => {
     return {
       papers: results.filter((r) => r.type === "paper"),
       annotations: results.filter((r) => r.type === "annotation"),
       conversations: results.filter((r) => r.type === "conversation"),
+      content: results.filter((r) => r.type === "content"),
     };
   }, [results]);
 
@@ -87,6 +115,9 @@ function SearchPanel() {
         clarifyScrollToEntryId: r.entry.id,
         clarifyMode: "clarify",
       });
+    } else if (r.type === "content") {
+      setActivePaper(r.paper.filePath);
+      setPage(r.pageNumber);
     }
     useAppStore.setState({ searchOpen: false, searchQuery: "" });
   }, [setActivePaper, setPage]);
@@ -124,7 +155,7 @@ function SearchPanel() {
                 if (e.key === "Escape") close();
                 if (e.key === "Enter" && results.length > 0) handleSelect(results[0]);
               }}
-              placeholder="Search papers, notes, AI conversations..."
+              placeholder="Search papers, notes, AI conversations, content..."
               className="flex-1 text-sm bg-transparent outline-none text-foreground placeholder:text-muted-foreground/50"
             />
             {searchQuery && (
@@ -207,6 +238,30 @@ function SearchPanel() {
                           </span>
                           <span className="text-[10px] text-muted-foreground/50">
                             {p?.title ?? "Unknown paper"} · {e.mode} · p.{e.page}
+                          </span>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </>
+              )}
+
+              {grouped.content.length > 0 && (
+                <>
+                  <div className="text-[10px] font-medium text-muted-foreground/50 uppercase tracking-wider px-2 py-1 mt-1">In Papers</div>
+                  {grouped.content.map((r, i) => {
+                    const c = r as SearchResult & { type: "content" };
+                    return (
+                      <button
+                        key={`content-${i}`}
+                        onClick={() => handleSelect(r)}
+                        className="flex items-center gap-2.5 px-2 py-1.5 rounded-md text-left hover:bg-secondary transition-colors"
+                      >
+                        <BookOpenText className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                        <div className="flex flex-col min-w-0">
+                          <span className="text-sm text-foreground truncate">{c.match}</span>
+                          <span className="text-[10px] text-muted-foreground/50">
+                            {c.paper.title} · p.{c.pageNumber}
                           </span>
                         </div>
                       </button>

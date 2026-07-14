@@ -61,24 +61,82 @@ export async function deleteNarration(paperPath: string): Promise<void> {
   });
 }
 
+export type PlaybackProgress = { positionSeconds: number; page: number | null };
+
 // Kept in a separate, tiny store so we can persist playback position on every
-// few seconds of playback without rewriting the (multi-MB) audio blob each time.
-export async function savePlaybackPosition(paperPath: string, positionSeconds: number): Promise<void> {
+// few seconds of playback without rewriting the (multi-MB) audio blob each
+// time. `page` is whatever Reader.tsx's updateReadingPage() already computed
+// for that instant (page boundaries are approximated from character
+// position within the narration text, same approximation the live
+// "Page N" indicator during playback already relies on) — stored so
+// "Continue Listening" can jump straight to it without needing the audio's
+// duration (which isn't known until the file is loaded) to redo that math.
+export async function savePlaybackPosition(paperPath: string, positionSeconds: number, page: number | null): Promise<void> {
   const db = await openDb();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(PROGRESS_STORE_NAME, "readwrite");
-    tx.objectStore(PROGRESS_STORE_NAME).put(positionSeconds, paperPath);
+    tx.objectStore(PROGRESS_STORE_NAME).put({ positionSeconds, page } satisfies PlaybackProgress, paperPath);
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });
 }
 
-export async function loadPlaybackPosition(paperPath: string): Promise<number | null> {
+export async function loadPlaybackPosition(paperPath: string): Promise<PlaybackProgress | null> {
   const db = await openDb();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(PROGRESS_STORE_NAME, "readonly");
     const req = tx.objectStore(PROGRESS_STORE_NAME).get(paperPath);
-    req.onsuccess = () => resolve(typeof req.result === "number" ? req.result : null);
+    req.onsuccess = () => {
+      const result = req.result;
+      // Old records (before `page` was tracked) were a plain number.
+      if (typeof result === "number") return resolve({ positionSeconds: result, page: null });
+      resolve(result ?? null);
+    };
     req.onerror = () => reject(req.error);
+  });
+}
+
+export type NarrationSummary = {
+  paperPath: string;
+  from: number;
+  to: number;
+  createdAt: number;
+  playbackPositionSeconds: number | null;
+  lastKnownPage: number | null;
+};
+
+// Metadata for every saved narration across the whole library (no audioBlob
+// — that's the point, this is for a "Continue Listening" list on Home,
+// which needs to cheaply show many papers at once, not play any of them).
+export async function listNarrationSummaries(): Promise<NarrationSummary[]> {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction([STORE_NAME, PROGRESS_STORE_NAME], "readonly");
+    const narrationsReq = tx.objectStore(STORE_NAME).getAll();
+    const posKeysReq = tx.objectStore(PROGRESS_STORE_NAME).getAllKeys();
+    const posValsReq = tx.objectStore(PROGRESS_STORE_NAME).getAll();
+
+    tx.onerror = () => reject(tx.error);
+    tx.oncomplete = () => {
+      const narrations = (narrationsReq.result ?? []) as SavedNarration[];
+      const posKeys = (posKeysReq.result ?? []) as string[];
+      const posVals = (posValsReq.result ?? []) as (PlaybackProgress | number)[];
+      const posMap = new Map(posKeys.map((k, i) => [k, posVals[i]]));
+      resolve(
+        narrations.map((n) => {
+          const raw = posMap.get(n.paperPath);
+          const progress: PlaybackProgress | null =
+            raw === undefined ? null : typeof raw === "number" ? { positionSeconds: raw, page: null } : raw;
+          return {
+            paperPath: n.paperPath,
+            from: n.from,
+            to: n.to,
+            createdAt: n.createdAt,
+            playbackPositionSeconds: progress?.positionSeconds ?? null,
+            lastKnownPage: progress?.page ?? null,
+          };
+        }),
+      );
+    };
   });
 }

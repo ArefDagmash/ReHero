@@ -1,5 +1,5 @@
-import { useCallback, useState, useEffect, useMemo } from "react";
-import { Plus, FileText, Trash2, Pencil, X, Sparkles, ChevronDown, User } from "lucide-react";
+import { useCallback, useState, useMemo, useEffect } from "react";
+import { Plus, FileText, Trash2, Pencil, X, Sparkles, ChevronDown, User, Headphones, Compass } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import AddPaperModal from "@/components/AddPaperModal";
 import PdfThumbnail from "@/components/PdfThumbnail";
@@ -8,6 +8,7 @@ import { addPaperFromBytes } from "@/lib/addPaper";
 import { useAppStore } from "@/store/useAppStore";
 import { ProgressBar } from "@/components/ui/progress-bar";
 import { LEVELS, getXpForNextLevel } from "@/lib/gamification";
+import { listNarrationSummaries, type NarrationSummary } from "@/lib/narrationStorage";
 import type { Paper } from "@/types";
 
 type SortKey = "recent" | "name" | "annotated";
@@ -70,25 +71,66 @@ function relativeTime(iso: string): string {
 function HomePage({ onOpenPaper, variant = "library" }: { onOpenPaper: () => void; variant?: Variant }) {
   const isBooks = variant === "books";
   const papers = useAppStore((s) => isBooks ? s.books : s.papers);
+  const allPapers = useAppStore((s) => s.papers);
+  const allBooks = useAppStore((s) => s.books);
   const conversations = useAppStore((s) => s.conversations);
   const setActivePaper = useAppStore((s) => s.setActivePaper);
   const setActiveBook = useAppStore((s) => s.setActiveBook);
+  const setPage = useAppStore((s) => s.setPage);
   const removePaper = useAppStore((s) => s.removePaper);
   const removeBook = useAppStore((s) => s.removeBook);
   const rightDockWidth = useAppStore((s) => s.rightDockWidth);
   const leftDockWidth = useAppStore((s) => s.leftDockWidth);
-  const bgTheme = useAppStore((s) => s.bgTheme);
   const [modalOpen, setModalOpen] = useState(false);
   const [sortKey, setSortKey] = useState<SortKey>("recent");
-
-  useEffect(() => {
-    document.documentElement.dataset.theme = bgTheme;
-  }, [bgTheme]);
 
   const [deleteTarget, setDeleteTarget] = useState<Paper | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
   const [hoveredId, setHoveredId] = useState<string | null>(null);
+
+  // "Continue Listening" (Home dashboard only) — narrations are saved to
+  // IndexedDB independent of the papers/books store, so this cross-
+  // references saved narrations against whatever's still in the library.
+  const [narrationSummaries, setNarrationSummaries] = useState<NarrationSummary[]>([]);
+  useEffect(() => {
+    if (variant !== "continue") return;
+    let cancelled = false;
+    listNarrationSummaries().then((s) => { if (!cancelled) setNarrationSummaries(s); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [variant]);
+
+  const continueListening = useMemo(() => {
+    if (variant !== "continue") return [];
+    return narrationSummaries
+      .map((summary) => {
+        const paper = allPapers.find((p) => p.filePath === summary.paperPath);
+        const book = allBooks.find((b) => b.filePath === summary.paperPath);
+        const match = paper ?? book;
+        if (!match) return null;
+        return { summary, item: match, isBook: !!book };
+      })
+      .filter((x): x is { summary: NarrationSummary; item: Paper; isBook: boolean } => x !== null)
+      .sort((a, b) => b.summary.createdAt - a.summary.createdAt);
+  }, [variant, narrationSummaries, allPapers, allBooks]);
+
+  const handleResumeListening = useCallback(
+    (entry: { item: Paper; isBook: boolean; summary: NarrationSummary }) => {
+      useAppStore.setState({ autoResumeNarration: true });
+      if (entry.isBook) {
+        setActiveBook(entry.item.filePath);
+      } else {
+        setActivePaper(entry.item.filePath);
+      }
+      // setActive{Paper,Book} above resets currentPage to the paper's own
+      // *reading* progress (lastPage) — override with wherever the
+      // narration itself last got to, falling back to where it started if
+      // it was never actually played yet.
+      setPage(entry.summary.lastKnownPage ?? entry.summary.from);
+      onOpenPaper();
+    },
+    [setActivePaper, setActiveBook, setPage, onOpenPaper],
+  );
 
   const conversationCounts = useMemo(() => {
     const counts: Record<string, number> = {};
@@ -233,6 +275,33 @@ function HomePage({ onOpenPaper, variant = "library" }: { onOpenPaper: () => voi
         <XPBadge />
       </div>
 
+      {/* Continue Listening — narrations are saved independent of the
+          papers/books list, and previously had no surface outside the one
+          specific paper's Reader; this mirrors "Continue Reading" above. */}
+      {continueListening.length > 0 && (
+        <div className="px-8 pb-4 shrink-0">
+          <p className="text-xs text-muted-foreground/50 mb-2">Continue Listening</p>
+          <div className="flex gap-2 overflow-x-auto pb-1">
+            {continueListening.map(({ summary, item }) => (
+              <button
+                key={summary.paperPath}
+                onClick={() => handleResumeListening({ item, summary, isBook: allBooks.some((b) => b.filePath === item.filePath) })}
+                className="shrink-0 flex items-center gap-2 pl-2.5 pr-3.5 py-2 rounded-full bg-card border border-border/60 hover:border-border hover:shadow-sm transition-all max-w-[260px]"
+                title={`Resume audio — pages ${summary.from}-${summary.to}`}
+              >
+                <span className="shrink-0 w-6 h-6 rounded-full bg-indigo-500/10 flex items-center justify-center">
+                  <Headphones className="h-3 w-3 text-indigo-500" />
+                </span>
+                <span className="text-xs text-foreground/80 truncate">{item.title}</span>
+                <span className="text-[10px] text-muted-foreground/50 shrink-0 tabular-nums">
+                  p.{summary.from}-{summary.to}
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Card grid */}
       <div className="flex-1 overflow-y-auto px-8 pb-8 pt-1">
         <div className="min-h-full flex flex-col">
@@ -299,6 +368,16 @@ function HomePage({ onOpenPaper, variant = "library" }: { onOpenPaper: () => voi
                       <div className="absolute top-2 right-2 flex items-center gap-0.5 bg-indigo-500/90 text-white text-[10px] px-1.5 py-0.5 rounded-full">
                         <Sparkles className="h-2.5 w-2.5" />
                         {count}
+                      </div>
+                    )}
+
+                    {/* Source badge — discovered via Explore vs. manually added */}
+                    {paper.source === "explore" && (
+                      <div
+                        className="absolute top-2 left-2 flex items-center gap-0.5 bg-card/90 text-muted-foreground text-[10px] px-1.5 py-0.5 rounded-full border border-border/60"
+                        title="Added from Explore"
+                      >
+                        <Compass className="h-2.5 w-2.5" />
                       </div>
                     )}
 

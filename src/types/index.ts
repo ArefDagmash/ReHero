@@ -7,6 +7,10 @@ export type Paper = {
   tags: string[];
   lastOpenedAt?: string;
   thumbnailUrl?: string;
+  // Undefined for anything added before this field existed — treated as
+  // "manual" wherever it's displayed, since that's what everything was
+  // before Explore could add papers itself.
+  source?: "manual" | "explore";
 };
 
 export type Annotation = {

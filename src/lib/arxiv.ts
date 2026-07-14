@@ -1,3 +1,5 @@
+import { log } from "@/lib/logger";
+
 // Same isTauri-branch pattern as llmStream.ts's resolveEndpoint(): native
 // Tauri hits arXiv directly (webview doesn't enforce CORS), web-dev mode
 // goes through the /api/proxy/arxiv route in vite.config.ts.
@@ -18,6 +20,40 @@ async function waitForArxivRateLimit(): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, ARXIV_MIN_INTERVAL_MS - elapsed));
   }
   lastArxivRequestAt = Date.now();
+}
+
+// arXiv's own API docs document 503 as "temporarily overloaded, back off and
+// retry" (sometimes with a Retry-After header) — worth a few retries rather
+// than failing a search outright over a transient blip. Anything else (400,
+// 404, ...) is a real error and isn't retried.
+const ARXIV_MAX_RETRIES = 3;
+const ARXIV_RETRY_BASE_DELAY_MS = 3000;
+
+function parseRetryAfterMs(header: string | null): number | null {
+  if (!header) return null;
+  const seconds = Number(header);
+  if (!Number.isNaN(seconds)) return seconds * 1000;
+  const dateMs = Date.parse(header);
+  return Number.isNaN(dateMs) ? null : Math.max(0, dateMs - Date.now());
+}
+
+async function fetchArxivWithRetry(url: string): Promise<Response> {
+  for (let attempt = 0; attempt <= ARXIV_MAX_RETRIES; attempt++) {
+    await waitForArxivRateLimit();
+    const res = await fetch(url);
+    if (res.ok) return res;
+    if (res.status !== 503 && res.status !== 429) {
+      throw new Error(`arXiv returned ${res.status}`);
+    }
+    if (attempt === ARXIV_MAX_RETRIES) {
+      throw new Error(`arXiv returned ${res.status} after ${ARXIV_MAX_RETRIES} retries`);
+    }
+    const delay = parseRetryAfterMs(res.headers.get("Retry-After")) ?? ARXIV_RETRY_BASE_DELAY_MS * (attempt + 1);
+    log.explore.info("arXiv request throttled/overloaded, retrying", { status: res.status, attempt, delayMs: delay });
+    await new Promise((resolve) => setTimeout(resolve, delay));
+  }
+  // unreachable — the loop always returns or throws — but keeps TS happy
+  throw new Error("arXiv request failed");
 }
 
 export type ArxivCategoryGroup = {
@@ -340,15 +376,27 @@ function parseEntry(entry: Element): ArxivPaper {
   };
 }
 
-// Raw keyword search against arXiv's `all:` field — no query rewriting yet
-// (see docs/explore-tab-plan.md Phase 1/4 notes on why that's deferred).
+// arXiv ORs space-separated words within a single `all:` field rather than
+// ANDing them or matching a phrase (verified live — see queryRewriter.ts)
+// — so a query rewritten into short key phrases needs each phrase quoted
+// AND'd as its own `all:"..."` clause to actually narrow results, not just
+// concatenated back into one field. A plain string (rewriting skipped or
+// failed) falls back to the old single `all:` behavior.
+function buildIntentFragment(query: string | string[]): string {
+  if (Array.isArray(query)) {
+    return query.map((phrase) => `all:"${phrase.replace(/"/g, "")}"`).join(" AND ");
+  }
+  return `all:${query}`;
+}
+
 export async function searchArxiv(
-  query: string,
+  query: string | string[],
   opts: { categoryValues?: string[]; maxResults?: number; start?: number } = {},
 ): Promise<ArxivPaper[]> {
   const { categoryValues, maxResults = 20, start = 0 } = opts;
   const categoryFragment = categoryValues && categoryValues.length > 0 ? buildCategoryFragment(categoryValues) : "";
-  const searchQuery = categoryFragment ? `all:${query} AND ${categoryFragment}` : `all:${query}`;
+  const intentFragment = buildIntentFragment(query);
+  const searchQuery = categoryFragment ? `${intentFragment} AND ${categoryFragment}` : intentFragment;
   const params = new URLSearchParams({
     search_query: searchQuery,
     start: String(start),
@@ -357,11 +405,7 @@ export async function searchArxiv(
     sortOrder: "descending",
   });
 
-  await waitForArxivRateLimit();
-  const res = await fetch(`${arxivApiBase()}?${params.toString()}`);
-  if (!res.ok) {
-    throw new Error(`arXiv returned ${res.status}`);
-  }
+  const res = await fetchArxivWithRetry(`${arxivApiBase()}?${params.toString()}`);
 
   const xml = await res.text();
   const doc = new DOMParser().parseFromString(xml, "application/xml");

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { Settings2, MessageSquareText } from "lucide-react";
+import { Settings2, Trophy } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useAppStore } from "@/store/useAppStore";
 
@@ -77,7 +77,7 @@ const navItems = [
   { id: "explore", label: "Explore" },
 ] as const;
 
-type NavId = (typeof navItems)[number]["id"] | "settings";
+type NavId = (typeof navItems)[number]["id"] | "achievements" | "settings";
 
 type Props = {
   active: NavId;
@@ -157,11 +157,16 @@ function Sidebar({ active, onNavigate, view }: Props) {
 
             <div className="border-t border-border/70 p-2 pt-3">
               <button
-                onClick={() => useAppStore.setState({ annotationPanelOpen: true })}
-                className={`flex items-center gap-3 w-full px-3 py-2 rounded-lg text-sm transition-colors text-muted-foreground hover:text-foreground hover:bg-secondary`}
+                onClick={() => onNavigate("achievements")}
+                aria-current={active === "achievements" ? "page" : undefined}
+                className={`flex items-center gap-3 w-full px-3 py-2 rounded-lg text-sm transition-colors ${
+                  active === "achievements"
+                    ? "bg-foreground text-background"
+                    : "text-muted-foreground hover:text-foreground hover:bg-secondary"
+                }`}
               >
-                <MessageSquareText className="h-5 w-5" />
-                Notes
+                <Trophy className="h-5 w-5" />
+                Achievements
               </button>
               <button
                 onClick={() => onNavigate("settings")}

@@ -1,9 +1,11 @@
 import { useMemo } from "react";
-import { Compass, Loader2, Check, ExternalLink, Sparkles, RotateCw } from "lucide-react";
+import { Compass, Loader2, Check, ExternalLink, Sparkles, RotateCw, History, X, BookOpen } from "lucide-react";
 import { useAppStore } from "@/store/useAppStore";
-import { useExploreStore, type CategoryMode } from "@/store/useExploreStore";
+import { useExploreStore, recordSearchHistory, removeSearchHistoryEntry, type CategoryMode } from "@/store/useExploreStore";
 import { searchArxiv, ARXIV_CATEGORY_GROUPS, type ArxivPaper } from "@/lib/arxiv";
+import { searchDoab } from "@/lib/doab";
 import { classifyPapers, rankPapers, type ClassificationResult, type RankedPaper } from "@/lib/paperClassifier";
+import { rewriteQuery } from "@/lib/queryRewriter";
 import { fetchCitationCounts } from "@/lib/semanticScholar";
 import { addPaperFromBytes } from "@/lib/addPaper";
 import LlmModelPicker from "@/components/LlmModelPicker";
@@ -119,8 +121,19 @@ function ExplorePage() {
   const addingId = useExploreStore((s) => s.addingId);
   const addedIds = useExploreStore((s) => s.addedIds);
   const addError = useExploreStore((s) => s.addError);
+  const lastSearchPhrases = useExploreStore((s) => s.lastSearchPhrases);
+  const searchHistory = useExploreStore((s) => s.searchHistory);
+
+  const mode = useExploreStore((s) => s.mode);
+  const booksPhase = useExploreStore((s) => s.booksPhase);
+  const booksActiveAction = useExploreStore((s) => s.booksActiveAction);
+  const booksError = useExploreStore((s) => s.booksError);
+  const rawBooks = useExploreStore((s) => s.rawBooks);
+  const hasSearchedBooks = useExploreStore((s) => s.hasSearchedBooks);
+  const noMoreBookResults = useExploreStore((s) => s.noMoreBookResults);
 
   const busy = phase !== "idle" && phase !== "error";
+  const booksBusy = booksPhase !== "idle" && booksPhase !== "error";
 
   // Single derived view combining raw search results + scores + citation
   // counts + rank order + sort mode — so citation counts (which arrive
@@ -151,18 +164,49 @@ function ExplorePage() {
 
   const hasCitationData = citationCounts.size > 0;
 
+  // Reads current query/category values fresh from the store rather than
+  // the component's reactive selectors — needed because recent-search chips
+  // call useExploreStore.setState(...) immediately followed by
+  // handleSearch() in the same tick, before React re-renders those selectors.
   const handleSearch = async () => {
-    const q = query.trim();
+    const state = useExploreStore.getState();
+    const q = state.query.trim();
+    const { categoryMode, category } = state;
     if (!q || busy) return;
     useExploreStore.setState({
-      activeAction: "search", phase: "searching", error: null, classifyWarning: null, noMoreResults: false,
+      activeAction: "search", phase: "rewriting", error: null, classifyWarning: null, noMoreResults: false,
     });
+    recordSearchHistory(q, categoryMode, category);
 
+    // arXiv ORs raw words together rather than ANDing/phrase-matching them
+    // (see queryRewriter.ts) — rewrite a sentence-length intent into a few
+    // key phrases first so the actual search is targeted. Best-effort: any
+    // failure just falls back to searching the raw text, same as before.
+    let phrases: string[];
+    try {
+      phrases = (await rewriteQuery(q)) ?? [q];
+    } catch (e) {
+      log.explore.error("query rewrite threw unexpectedly", e);
+      phrases = [q];
+    }
+
+    useExploreStore.setState({ phase: "searching" });
     const categoryValues = resolveCategoryValues(categoryMode, category);
     let papers: ArxivPaper[];
+    let usedPhrases = phrases;
     try {
-      papers = await searchArxiv(q, { categoryValues, maxResults: PAGE_SIZE });
-      log.explore.info("arxiv search results", { query: q, categoryValues, count: papers.length });
+      papers = await searchArxiv(phrases, { categoryValues, maxResults: PAGE_SIZE });
+      log.explore.info("arxiv search results", { query: q, phrases, categoryValues, count: papers.length });
+
+      // ANDing several exact phrases is strict — every extra phrase (or an
+      // oddly-worded one) risks matching literally nothing. If it comes up
+      // empty, fall back to the old raw-keyword OR search rather than
+      // leaving the user with a hard zero purely from over-constraining.
+      if (papers.length === 0 && phrases.length > 0) {
+        log.explore.info("phrase search returned 0 results, falling back to raw keyword search", { phrases });
+        papers = await searchArxiv(q, { categoryValues, maxResults: PAGE_SIZE });
+        usedPhrases = [];
+      }
     } catch (e: any) {
       log.explore.error("arxiv search failed", e);
       useExploreStore.setState({
@@ -174,6 +218,7 @@ function ExplorePage() {
     useExploreStore.setState({
       lastQuery: q,
       lastCategoryValues: categoryValues,
+      lastSearchPhrases: usedPhrases,
       rawPapers: papers,
       scoredEntries: new Map(),
       citationCounts: new Map(),
@@ -198,7 +243,7 @@ function ExplorePage() {
 
     let nextBatch: ArxivPaper[];
     try {
-      nextBatch = await searchArxiv(state.lastQuery, {
+      nextBatch = await searchArxiv(state.lastSearchPhrases.length > 0 ? state.lastSearchPhrases : state.lastQuery, {
         categoryValues: state.lastCategoryValues,
         maxResults: PAGE_SIZE,
         start: state.rawPapers.length,
@@ -223,6 +268,53 @@ function ExplorePage() {
     fetchMissingCitations(merged);
   };
 
+  // Books (DOAB) — Phase 0/1 only: plain search, no query rewriting, AI
+  // classification, or citation lookup yet (see docs/explore-books-plan.md).
+  const handleSearchBooks = async () => {
+    const state = useExploreStore.getState();
+    const q = state.query.trim();
+    if (!q || booksBusy) return;
+    useExploreStore.setState({
+      booksActiveAction: "search", booksPhase: "searching", booksError: null, noMoreBookResults: false,
+    });
+
+    try {
+      const books = await searchDoab(q, { maxResults: PAGE_SIZE });
+      log.explore.info("doab search results", { query: q, count: books.length });
+      useExploreStore.setState({
+        lastBookQuery: q,
+        rawBooks: books,
+        hasSearchedBooks: true,
+        booksPhase: "idle",
+        booksActiveAction: null,
+      });
+    } catch (e: any) {
+      log.explore.error("doab search failed", e);
+      useExploreStore.setState({
+        booksError: e?.message ?? "Search failed.", booksPhase: "error", booksActiveAction: null, hasSearchedBooks: true,
+      });
+    }
+  };
+
+  const handleLoadMoreBooks = async () => {
+    const state = useExploreStore.getState();
+    if (booksBusy || !state.lastBookQuery) return;
+    useExploreStore.setState({ booksActiveAction: "loadMore", booksPhase: "searching", booksError: null });
+
+    try {
+      const nextBatch = await searchDoab(state.lastBookQuery, { maxResults: PAGE_SIZE, start: state.rawBooks.length });
+      log.explore.info("doab load more results", { query: state.lastBookQuery, start: state.rawBooks.length, count: nextBatch.length });
+      if (nextBatch.length === 0) {
+        useExploreStore.setState({ noMoreBookResults: true, booksPhase: "idle", booksActiveAction: null });
+        return;
+      }
+      useExploreStore.setState((s) => ({ rawBooks: [...s.rawBooks, ...nextBatch], booksPhase: "idle", booksActiveAction: null }));
+    } catch (e: any) {
+      log.explore.error("doab load more failed", e);
+      useExploreStore.setState({ booksError: e?.message ?? "Couldn't load more results.", booksPhase: "error", booksActiveAction: null });
+    }
+  };
+
   const handleAdd = async (paper: ArxivPaper) => {
     useExploreStore.setState({ addingId: paper.id, addError: null });
     try {
@@ -232,7 +324,7 @@ function ExplorePage() {
       // navigate: false — stay on the results list so you can add several
       // candidates in one pass, instead of jumping into the Reader like a
       // manual upload does.
-      await addPaperFromBytes(bytes, paper.title, false, { navigate: false });
+      await addPaperFromBytes(bytes, paper.title, false, { navigate: false, source: "explore" });
       useExploreStore.setState((s) => ({ addedIds: new Set(s.addedIds).add(paper.id) }));
     } catch (e: any) {
       log.explore.error("add to library failed", e);
@@ -244,6 +336,7 @@ function ExplorePage() {
 
   const phaseLabel = (forAction: "search" | "loadMore") => {
     if (activeAction !== forAction) return null;
+    if (phase === "rewriting") return "Refining search terms...";
     if (phase === "searching") return forAction === "search" ? "Searching arXiv..." : "Fetching more...";
     if (phase === "classifying") return `Scoring${classifyProgress ? ` (${classifyProgress.current}/${classifyProgress.total})` : "..."}`;
     if (phase === "ranking") return "Comparing top matches...";
@@ -261,26 +354,50 @@ function ExplorePage() {
           <h1 className="text-lg font-medium text-foreground">Explore</h1>
         </div>
         <p className="text-sm text-muted-foreground mb-4">
-          Describe what you're looking for — the topic, the purpose, what the
-          paper should cover — and an AI will search arXiv and rank
-          candidates against what you said.
+          {mode === "papers"
+            ? "Describe what you're looking for — the topic, the purpose, what the paper should cover — and an AI will search arXiv and rank candidates against what you said."
+            : "Describe what you're looking for and search open-access academic books from DOAB (Directory of Open Access Books)."}
         </p>
 
-        <div className="mb-6 p-3 rounded-lg bg-secondary/40 border border-border/60">
-          <LlmModelPicker compact />
+        {/* Papers = arXiv, Books = DOAB — see docs/explore-books-plan.md.
+            Books mode is plain search only for now (no AI ranking yet). */}
+        <div className="flex rounded-lg border border-border overflow-hidden shrink-0 text-xs mb-4 w-fit">
+          <button
+            onClick={() => useExploreStore.setState({ mode: "papers" })}
+            className={`flex items-center gap-1.5 px-3 py-1.5 transition-colors ${mode === "papers" ? "bg-foreground text-background" : "bg-card text-muted-foreground hover:text-foreground"}`}
+          >
+            <Compass className="h-3 w-3" />
+            Papers
+          </button>
+          <button
+            onClick={() => useExploreStore.setState({ mode: "books" })}
+            className={`flex items-center gap-1.5 px-3 py-1.5 transition-colors ${mode === "books" ? "bg-foreground text-background" : "bg-card text-muted-foreground hover:text-foreground"}`}
+          >
+            <BookOpen className="h-3 w-3" />
+            Books
+          </button>
         </div>
+
+        {mode === "papers" && (
+          <div className="mb-6 p-3 rounded-lg bg-secondary/40 border border-border/60">
+            <LlmModelPicker compact />
+          </div>
+        )}
 
         <div className="flex flex-col gap-2 mb-6">
           <textarea
             value={query}
             onChange={(e) => useExploreStore.setState({ query: e.target.value })}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) handleSearch();
+              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) (mode === "papers" ? handleSearch() : handleSearchBooks());
             }}
-            placeholder="e.g. I'm looking for recent work on real-time hierarchical object detection for traffic sign recognition, ideally with a benchmark comparison"
+            placeholder={mode === "papers"
+              ? "e.g. I'm looking for recent work on real-time hierarchical object detection for traffic sign recognition, ideally with a benchmark comparison"
+              : "e.g. an introductory textbook on machine learning"}
             rows={3}
             className="w-full px-3 py-2 rounded-lg bg-card border border-border text-sm text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-ring resize-none"
           />
+          {mode === "papers" && (
           <div className="flex items-center gap-2">
             {/* General = one option per archive (e.g. "Physics" -> physics.*);
                 Detailed = the full ~155-category list. Switching resets the
@@ -335,22 +452,72 @@ function ExplorePage() {
               {phaseLabel("search") ?? "Search"}
             </button>
           </div>
+          )}
+          {mode === "books" && (
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleSearchBooks}
+                disabled={booksBusy || !query.trim()}
+                className="flex items-center gap-2 px-4 py-2 rounded-lg bg-foreground text-background text-sm font-medium hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed ml-auto"
+              >
+                {booksBusy && <Loader2 className="h-4 w-4 animate-spin" />}
+                {booksActiveAction === "search" && booksPhase === "searching" ? "Searching DOAB..." : "Search"}
+              </button>
+            </div>
+          )}
         </div>
 
-        {phase === "error" && (
+        {mode === "papers" && searchHistory.length > 0 && (
+          <div className="flex items-center gap-1.5 flex-wrap mb-4 -mt-2">
+            <History className="h-3 w-3 text-muted-foreground/50 shrink-0" />
+            {searchHistory.map((entry) => (
+              <span
+                key={entry.searchedAt}
+                className="group flex items-center gap-1 pl-2 pr-1 py-1 rounded-full bg-secondary/60 text-xs text-muted-foreground hover:text-foreground transition-colors"
+              >
+                <button
+                  onClick={() => {
+                    useExploreStore.setState({ query: entry.query, categoryMode: entry.categoryMode, category: entry.category });
+                    handleSearch();
+                  }}
+                  disabled={busy}
+                  className="max-w-[220px] truncate disabled:cursor-not-allowed"
+                  title={entry.query}
+                >
+                  {entry.query}
+                </button>
+                <button
+                  onClick={() => removeSearchHistoryEntry(entry.searchedAt)}
+                  className="opacity-0 group-hover:opacity-100 transition-opacity p-0.5 rounded-full hover:bg-secondary"
+                  title="Remove from history"
+                >
+                  <X className="h-2.5 w-2.5" />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+
+        {mode === "papers" && lastSearchPhrases.length > 1 && hasSearched && (
+          <p className="text-xs text-muted-foreground/50 mb-4 -mt-2">
+            Searched arXiv for: {lastSearchPhrases.map((p) => `"${p}"`).join(" AND ")}
+          </p>
+        )}
+
+        {mode === "papers" && phase === "error" && (
           <p className="text-sm text-red-500 mb-4">{error}</p>
         )}
-        {addError && (
+        {mode === "papers" && addError && (
           <p className="text-sm text-red-500 mb-4">{addError}</p>
         )}
-        {classifyWarning && (
+        {mode === "papers" && classifyWarning && (
           <p className="text-xs text-muted-foreground/70 mb-4">{classifyWarning}</p>
         )}
-        {hasSearched && phase === "idle" && results.length === 0 && (
+        {mode === "papers" && hasSearched && phase === "idle" && results.length === 0 && (
           <p className="text-sm text-muted-foreground">No results. Try describing it differently.</p>
         )}
 
-        {results.length > 0 && (
+        {mode === "papers" && results.length > 0 && (
           <div className="flex flex-col gap-4">
             {hasCitationData && (
               <div className="flex items-center gap-2 -mb-2">
@@ -468,6 +635,71 @@ function ExplorePage() {
                   <RotateCw className="h-3.5 w-3.5" />
                 )}
                 {phaseLabel("loadMore") ?? "Look through more papers"}
+              </button>
+            )}
+          </div>
+        )}
+
+        {mode === "books" && booksPhase === "error" && (
+          <p className="text-sm text-red-500 mb-4">{booksError}</p>
+        )}
+        {mode === "books" && hasSearchedBooks && booksPhase === "idle" && rawBooks.length === 0 && (
+          <p className="text-sm text-muted-foreground">No results. Try describing it differently.</p>
+        )}
+
+        {mode === "books" && rawBooks.length > 0 && (
+          <div className="flex flex-col gap-4">
+            {rawBooks.map((book) => (
+              <div key={book.id} className="p-4 rounded-xl bg-card border border-border/60">
+                <div className="flex items-start justify-between gap-3 mb-1">
+                  <a
+                    href={book.doabUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-sm font-medium text-foreground hover:underline"
+                  >
+                    {book.title}
+                  </a>
+                </div>
+                <p className="text-xs text-muted-foreground mb-2">
+                  {book.authors.slice(0, 4).join(", ")}
+                  {book.authors.length > 4 ? " et al." : ""}
+                  {book.publisher && ` · ${book.publisher}`}
+                  {book.published && ` · ${book.published}`}
+                  {book.categories.length > 0 && ` · ${book.categories.slice(0, 3).join(", ")}`}
+                </p>
+                {book.summary && (
+                  <p className="text-xs text-muted-foreground/70 line-clamp-3 mb-2">{book.summary}</p>
+                )}
+
+                <div className="flex items-center gap-3 mt-2">
+                  <a
+                    href={book.doabUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-foreground text-background hover:opacity-90 transition-opacity"
+                  >
+                    <BookOpen className="h-3.5 w-3.5" />
+                    Open Book
+                  </a>
+                </div>
+              </div>
+            ))}
+
+            {noMoreBookResults ? (
+              <p className="text-center text-xs text-muted-foreground/60 py-2">No more results for this search.</p>
+            ) : (
+              <button
+                onClick={handleLoadMoreBooks}
+                disabled={booksBusy}
+                className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg border border-border text-sm text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {booksActiveAction === "loadMore" && booksBusy ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <RotateCw className="h-3.5 w-3.5" />
+                )}
+                {booksActiveAction === "loadMore" && booksBusy ? "Fetching more..." : "Look through more books"}
               </button>
             )}
           </div>
