@@ -111,9 +111,9 @@ function SearchPanel() {
       setActivePaper(r.paper.filePath);
       setPage(r.entry.page);
       useAppStore.setState({
-        clarifyPanelOpen: true,
-        clarifyScrollToEntryId: r.entry.id,
-        clarifyMode: "clarify",
+        aiPanelOpen: true,
+        aiScrollToEntryId: r.entry.id,
+        aiMode: "clarify",
       });
     } else if (r.type === "content") {
       setActivePaper(r.paper.filePath);

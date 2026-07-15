@@ -1,5 +1,5 @@
 import { useCallback, useState, useMemo, useEffect } from "react";
-import { Plus, FileText, Trash2, Pencil, X, Sparkles, ChevronDown, User, Headphones, Compass } from "lucide-react";
+import { Plus, FileText, Trash2, Pencil, X, Sparkles, ChevronDown, User, Headphones, Compass, Tag } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import AddPaperModal from "@/components/AddPaperModal";
 import PdfThumbnail from "@/components/PdfThumbnail";
@@ -79,10 +79,15 @@ function HomePage({ onOpenPaper, variant = "library" }: { onOpenPaper: () => voi
   const setPage = useAppStore((s) => s.setPage);
   const removePaper = useAppStore((s) => s.removePaper);
   const removeBook = useAppStore((s) => s.removeBook);
+  const addTag = useAppStore((s) => s.addTag);
+  const removeTag = useAppStore((s) => s.removeTag);
   const rightDockWidth = useAppStore((s) => s.rightDockWidth);
   const leftDockWidth = useAppStore((s) => s.leftDockWidth);
   const [modalOpen, setModalOpen] = useState(false);
   const [sortKey, setSortKey] = useState<SortKey>("recent");
+  const [filterTag, setFilterTag] = useState<string | null>(null);
+  const [tagInputId, setTagInputId] = useState<string | null>(null);
+  const [tagInputText, setTagInputText] = useState("");
 
   const [deleteTarget, setDeleteTarget] = useState<Paper | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -142,7 +147,10 @@ function HomePage({ onOpenPaper, variant = "library" }: { onOpenPaper: () => voi
   }, [conversations]);
 
   const sortedPapers = useMemo(() => {
-    const list = [...papers];
+    let list = [...papers];
+    if (filterTag) {
+      list = list.filter((p) => p.tags.includes(filterTag));
+    }
     switch (sortKey) {
       case "name":
         list.sort((a, b) => a.title.localeCompare(b.title));
@@ -160,7 +168,13 @@ function HomePage({ onOpenPaper, variant = "library" }: { onOpenPaper: () => voi
         break;
     }
     return list;
-  }, [papers, sortKey, conversationCounts]);
+  }, [papers, sortKey, conversationCounts, filterTag]);
+
+  const allTags = useMemo(() => {
+    const s = new Set<string>();
+    for (const p of papers) for (const t of p.tags) s.add(t);
+    return [...s].sort();
+  }, [papers]);
 
   const displayPapers = variant === "continue" ? sortedPapers : sortedPapers;
 
@@ -305,24 +319,60 @@ function HomePage({ onOpenPaper, variant = "library" }: { onOpenPaper: () => voi
       {/* Card grid */}
       <div className="flex-1 overflow-y-auto px-8 pb-8 pt-1">
         <div className="min-h-full flex flex-col">
-        {/* Sort — sits right above the cards */}
-        <div className="flex justify-end mb-4 relative group/sort shrink-0">
-          <button className="flex items-center gap-1.5 text-xs text-muted-foreground/50 hover:text-muted-foreground transition-colors">
-            <span className="capitalize">{sortKey}</span>
-            <ChevronDown className="h-3 w-3" />
-          </button>
-          <div className="absolute right-0 top-full mt-1 py-1 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover/sort:opacity-100 group-hover/sort:visible transition-all z-10 min-w-[120px]">
-            {(["recent", "name", "annotated"] as SortKey[]).map((key) => (
-              <button
-                key={key}
-                onClick={() => setSortKey(key)}
-                className={`block w-full text-left px-3 py-1.5 text-xs hover:bg-secondary transition-colors capitalize ${
-                  sortKey === key ? "text-foreground" : "text-muted-foreground"
-                }`}
-              >
-                {key}
-              </button>
-            ))}
+        {/* Sort + Tags — sits right above the cards */}
+        <div className="flex items-center justify-between mb-4 shrink-0">
+          {/* Tag filter */}
+          <div className="relative group/tags">
+            <button className="flex items-center gap-1.5 text-xs text-muted-foreground/50 hover:text-muted-foreground transition-colors">
+              <Tag className="h-3 w-3" />
+              {filterTag ? <span className="max-w-[100px] truncate">{filterTag}</span> : <span>tags</span>}
+              <ChevronDown className="h-3 w-3" />
+            </button>
+            <div className="absolute left-0 top-full mt-1 py-1 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover/tags:opacity-100 group-hover/tags:visible transition-all z-10 min-w-[100px] max-h-[200px] overflow-y-auto">
+              {filterTag && (
+                <button
+                  onClick={() => setFilterTag(null)}
+                  className="block w-full text-left px-3 py-1.5 text-xs text-muted-foreground hover:bg-secondary transition-colors"
+                >
+                  all papers
+                </button>
+              )}
+              {allTags.length === 0 && (
+                <span className="block px-3 py-1.5 text-xs text-muted-foreground/40">no tags yet</span>
+              )}
+              {allTags.map((tag) => (
+                <button
+                  key={tag}
+                  onClick={() => setFilterTag(filterTag === tag ? null : tag)}
+                  className={`block w-full text-left px-3 py-1.5 text-xs hover:bg-secondary transition-colors ${
+                    filterTag === tag ? "text-foreground bg-secondary/50" : "text-muted-foreground"
+                  }`}
+                >
+                  {tag}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Sort */}
+          <div className="relative group/sort">
+            <button className="flex items-center gap-1.5 text-xs text-muted-foreground/50 hover:text-muted-foreground transition-colors">
+              <span className="capitalize">{sortKey}</span>
+              <ChevronDown className="h-3 w-3" />
+            </button>
+            <div className="absolute right-0 top-full mt-1 py-1 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover/sort:opacity-100 group-hover/sort:visible transition-all z-10 min-w-[120px]">
+              {(["recent", "name", "annotated"] as SortKey[]).map((key) => (
+                <button
+                  key={key}
+                  onClick={() => setSortKey(key)}
+                  className={`block w-full text-left px-3 py-1.5 text-xs hover:bg-secondary transition-colors capitalize ${
+                    sortKey === key ? "text-foreground" : "text-muted-foreground"
+                  }`}
+                >
+                  {key}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
         {/* Vertically centers the row within leftover space when there are
@@ -404,6 +454,28 @@ function HomePage({ onOpenPaper, variant = "library" }: { onOpenPaper: () => voi
                       )}
                     </div>
 
+                    {/* Tag chips */}
+                    {paper.tags.length > 0 && (
+                      <div className="px-3 pb-1.5 flex flex-wrap gap-1">
+                        {paper.tags.slice(0, 2).map((tag) => (
+                          <span
+                            key={tag}
+                            onClick={(e) => { e.stopPropagation(); removeTag(paper.id, tag); }}
+                            className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] bg-secondary/60 text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors cursor-pointer group/tag"
+                            title="Click to remove"
+                          >
+                            {tag}
+                            <X className="h-2.5 w-2.5 opacity-0 group-hover/tag:opacity-100 transition-opacity" />
+                          </span>
+                        ))}
+                        {paper.tags.length > 2 && (
+                          <span className="text-[10px] text-muted-foreground/50 self-center">
+                            +{paper.tags.length - 2}
+                          </span>
+                        )}
+                      </div>
+                    )}
+
                     {/* Progress bar */}
                     {paper.totalPages > 0 && (
                       <div className="px-3 pb-2">
@@ -441,6 +513,13 @@ function HomePage({ onOpenPaper, variant = "library" }: { onOpenPaper: () => voi
                             <Pencil className="h-4 w-4" />
                           </button>
                           <button
+                            onClick={(e) => { e.stopPropagation(); setTagInputId(tagInputId === paper.id ? null : paper.id); setTagInputText(""); }}
+                            className="p-1 rounded-md text-muted-foreground/30 hover:text-foreground hover:bg-secondary transition-colors"
+                            title="Add tag"
+                          >
+                            <Tag className="h-4 w-4" />
+                          </button>
+                          <button
                             onClick={(e) => { e.stopPropagation(); setDeleteTarget(paper); }}
                             className="p-1 rounded-md text-muted-foreground/30 hover:text-red-500 hover:bg-red-500/10 transition-colors"
                             title="Delete"
@@ -462,6 +541,37 @@ function HomePage({ onOpenPaper, variant = "library" }: { onOpenPaper: () => voi
                       )}
                     </AnimatePresence>
                   </div>
+
+                  {/* Inline tag input */}
+                  <AnimatePresence>
+                    {tagInputId === paper.id && (
+                      <motion.div
+                        initial={{ opacity: 0, y: -4 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: -4 }}
+                        className="flex items-center gap-1 min-h-[28px]"
+                      >
+                        <input
+                          value={tagInputText}
+                          onChange={(e) => setTagInputText(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" && tagInputText.trim()) {
+                              e.stopPropagation();
+                              addTag(paper.id, tagInputText.trim());
+                              setTagInputText("");
+                              setTagInputId(null);
+                            }
+                            if (e.key === "Escape") { e.stopPropagation(); setTagInputId(null); setTagInputText(""); }
+                          }}
+                          placeholder="new tag..."
+                          className="w-full px-2 py-0.5 text-xs bg-background border border-border rounded-md outline-none focus:ring-1 focus:ring-ring"
+                          autoFocus
+                          onClick={(e) => e.stopPropagation()}
+                          onBlur={() => { setTagInputId(null); setTagInputText(""); }}
+                        />
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
                 </motion.div>
               );
             })}

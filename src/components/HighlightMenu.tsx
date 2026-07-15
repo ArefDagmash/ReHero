@@ -91,10 +91,10 @@ function HighlightMenu() {
     if (!highlightText) return;
     const state = useAppStore.getState();
     useAppStore.setState({
-      clarifyHighlightText: highlightText,
-      clarifyHighlightRects: state.currentDoodleRects,
-      clarifyMode: mode,
-      clarifyPanelOpen: true,
+      aiHighlightText: highlightText,
+      aiHighlightRects: state.currentDoodleRects,
+      aiMode: mode,
+      aiPanelOpen: true,
       highlightMenuVisible: false,
     });
   }, [highlightText]);

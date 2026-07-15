@@ -6,6 +6,7 @@ import { useAppStore } from "@/store/useAppStore";
 import { useDragMove, useDragResize } from "@/lib/useDragMove";
 import { getPageText } from "@/lib/pdfContext";
 import { streamLlm } from "@/lib/llmStream";
+import { log } from "@/lib/logger";
 import type { ChatMessage, StoredEntry } from "@/types";
 import { getModeIcon } from "@/components/HighlightMenu";
 
@@ -32,13 +33,150 @@ function renderMarkdown(text: string): string {
 
 function uid() { return Math.random().toString(36).slice(2, 9); }
 
+// The user is already reading a dense paper — every mode must answer as
+// short as possible so they get the point and move on, not read more text.
+// Some models ignore prose-only/length instructions and answer with headers,
+// bullet lists, and multiple sections anyway. Backed by two hard backstops:
+// a small token ceiling (SHORT_ANSWER_MAX_TOKENS) and toPlainSentences()
+// below, which strips any markdown structure the model produces and caps
+// the result at 2 sentences no matter what the model actually sent back.
+const BREVITY = "Be as short as possible without losing the specific substance of the highlighted passage: 1 short sentence for a single idea, up to 3 only if the passage covers multiple distinct steps, components, or numbers — never more, and never pad to reach that limit. Every sentence must reference something concrete from the highlighted passage (a specific method, name, number, or step) — do not write vague filler like \"this describes a system for X\" or \"the paper covers several topics.\" The reader is already reading this paper — never describe the paper or system at a meta level (\"This research proposes...\", \"This paper describes...\", \"The system is designed to...\"); jump straight into what the highlighted passage actually says, like you're answering \"what does this mean\" not \"what is this paper about.\" Plain prose only — never use markdown headers, bullet points, numbered lists, or bold section titles, no matter how long or complex the source text is. If the passage contains a formula or equation, never reproduce it in LaTeX (no $...$, no \\text{}, no \\frac{}{}) — write it in plain text instead, like \"true positives divided by true positives plus false positives\" or \"TP / (TP + FP).\" No preamble, no restating the question, no filler like \"Sure,\" \"Certainly,\" or \"Here is a summary,\" no closing recap — just the answer, nothing else.";
+
+// Hard ceiling for every mode except graph (which needs room for diagram
+// code). This backstops BREVITY for models that don't follow instructions.
+// Models tend to spend their first 1-2 sentences on scene-setting/analogy
+// before getting to a multi-step breakdown, so this needs enough headroom
+// for that plus every step — not just enough for one vague sentence.
+const SHORT_ANSWER_MAX_TOKENS = 320;
+
+// Deterministic backstop: strips markdown headers/bullets/numbered-list
+// markers/bold-only lines, strips a LEADING filler clause that leads into a
+// colon ("Here's a summary of the key points: ..."), then drops a leading
+// full sentence that's just paper-description framing ("This research
+// proposes...") and keeps only the first `maxSentences` of what's left.
+// Applied to every non-graph answer so a noncompliant model can open with
+// throat-clearing or describe the paper instead of the highlight, and the
+// user still only sees substance.
+//
+// Deliberately narrow noun list (research|paper|study|work only) — words
+// like "system", "text", "section", or "passage" are frequently the actual
+// domain subject of the highlighted content itself (e.g. a text-recognition
+// paper legitimately says "the text is bilingual: ..."), so including them
+// caused false positives that mangled real content mid-sentence.
+//
+// Also anchored to the START of the answer only (not a global replace) —
+// matching anywhere mid-text risked eating into genuine content later on.
+const FILLER_OPENER = "here'?s|here is|sure|certainly|okay|ok|below is|the following is|in summary|to summarize|(?:this|the)\\s+(?:research|paper|study|work)\\s+(?:is|proposes|describes|discusses|presents|introduces|details|explains|outlines)";
+const FILLER_CLAUSE_RE = new RegExp(`^(?:${FILLER_OPENER})\\b[^:.!?]*:\\s*`, "i");
+const FILLER_SENTENCE_RE = new RegExp(`^(?:${FILLER_OPENER})\\b`, "i");
+
+// Splits on ., !, ? but (a) never inside unclosed parentheses, so a
+// parenthetical containing its own punctuation doesn't get chopped mid-way
+// (which was leaving dangling ")" fragments at the start of the visible
+// answer), and (b) skips periods that look like abbreviations or decimals
+// ("e.g.", "i.e.", "Fig.", "3.14") rather than real sentence ends.
+function splitSentences(text: string): string[] {
+  const sentences: string[] = [];
+  let start = 0;
+  let parenDepth = 0;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "(") parenDepth++;
+    else if (ch === ")") parenDepth = Math.max(0, parenDepth - 1);
+    if ((ch === "." || ch === "!" || ch === "?") && parenDepth === 0) {
+      const next = text[i + 1];
+      const looksLikeAbbreviation = ch === "." && next && /[a-z0-9]/.test(next);
+      if (!looksLikeAbbreviation) {
+        const piece = text.slice(start, i + 1).trim();
+        if (piece) sentences.push(piece);
+        start = i + 1;
+      }
+    }
+  }
+  const rest = text.slice(start).trim();
+  if (rest) sentences.push(rest);
+  return sentences;
+}
+
+// Papers write formulas in LaTeX, and the model reproduces that verbatim
+// even when told to write plain text — the app's markdown renderer doesn't
+// parse LaTeX, so $\text{TP}/(\text{TP}+\text{FP})$ was showing up as raw
+// backslash-and-brace soup instead of readable text. Handles the common
+// academic-formula patterns without needing a full LaTeX parser.
+const LATEX_SYMBOL_MAP: Record<string, string> = {
+  "\\times": "x", "\\cdot": "*", "\\div": "/", "\\geq": ">=", "\\leq": "<=",
+  "\\neq": "!=", "\\approx": "~", "\\pm": "+/-", "\\infty": "infinity",
+  "\\sum": "sum", "\\prod": "product", "\\rightarrow": "->", "\\leftarrow": "<-",
+};
+
+function stripLatex(text: string): string {
+  let out = text;
+  // \frac{A}{B} -> A/B — run a few passes for formulas with nested fractions
+  for (let i = 0; i < 3; i++) out = out.replace(/\\frac\{([^{}]*)\}\{([^{}]*)\}/g, "$1/$2");
+  out = out.replace(/\\(?:text|mathrm|mathbf|mathit|operatorname)\{([^{}]*)\}/g, "$1"); // \text{X} -> X
+  for (const [cmd, plain] of Object.entries(LATEX_SYMBOL_MAP)) out = out.split(cmd).join(plain);
+  out = out.replace(/\\left|\\right/g, "");
+  out = out.replace(/([_^])\{([^{}]*)\}/g, "$1$2"); // x_{i} -> x_i, x^{2} -> x^2
+  out = out.replace(/\\[a-zA-Z]+\{([^{}]*)\}/g, "$1"); // any remaining \command{arg} -> arg
+  out = out.replace(/\\[a-zA-Z]+/g, ""); // any remaining bare \command
+  out = out.replace(/\${1,2}/g, ""); // $...$ / $$...$$ delimiters
+  return out.replace(/[{}]/g, "").replace(/\s+/g, " ").trim();
+}
+
+function toPlainSentences(raw: string, maxSentences = 5): string {
+  const kept: string[] = [];
+  for (const rawLine of raw.split("\n")) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    if (/^#{1,6}\s/.test(line)) continue; // markdown header line
+    if (/^(\*\*.+\*\*|__.+__)$/.test(line)) continue; // bold-only line (section title)
+    const cleaned = stripLatex(
+      line
+        .replace(/^[-*•]+\s*/, "")    // bullet marker (incl. a bare "*" divider)
+        .replace(/^\d+[.)]\s+/, "")   // numbered list marker
+        .replace(/\*\*/g, "")         // bold markers
+        .replace(/^#{1,6}\s*/, "")    // stray leading hashes
+    );
+    if (cleaned && /[a-zA-Z0-9]/.test(cleaned)) kept.push(cleaned);
+  }
+  let flowing = kept.join(" ").replace(/\s+/g, " ").trim();
+  // Strip a leading filler clause up to its colon so real content after it
+  // survives (e.g. "...: To build an automated system that...") even when
+  // the model glues it to the filler with a colon instead of a period.
+  flowing = flowing.replace(FILLER_CLAUSE_RE, "").trim();
+  if (!flowing) return "";
+  const rawSentences = splitSentences(flowing);
+  if (rawSentences.length > 0 && FILLER_SENTENCE_RE.test(rawSentences[0])) rawSentences.shift();
+  const sentences = rawSentences.length > 0 ? rawSentences : [flowing];
+  return sentences.slice(0, maxSentences).join(" ").trim();
+}
+
+// Surrounding-page context (up to 5 pages of raw PDF text) kept drowning out
+// the actual highlighted passage no matter how it was fenced/labeled when it
+// came first — models attend most to the start and especially the END of a
+// prompt ("lost in the middle"), so putting the highlight first and the
+// instruction last-but-referring-backward meant "answer ONLY about this"
+// was competing with a much larger, more recent block of text. Reordered:
+// context leads (clearly demoted as background), then an explicit pivot,
+// then the fenced highlight, then a forceful instruction as the very last
+// thing the model reads before generating.
+function buildAskContent(highlightText: string, page: number, ctx: string, instruction?: string): string {
+  const ctxBlock = ctx
+    ? `Here is background context from the surrounding pages (page ${page} and nearby), for reference only:\n${ctx}\n\nNow ignore all of the above except as background context.\n\n`
+    : "";
+  const tail = instruction
+    ? `\n\n${instruction} Answer ONLY about the passage in the quotes directly above — not the paper, not the background context, not the overall system, unless that is explicitly what the quoted passage itself is about.`
+    : "";
+  return `${ctxBlock}The user highlighted this exact passage on page ${page}:\n"""\n${highlightText}\n"""${tail}`;
+}
+
 const MODE_PROMPTS: Record<string, { title: string; system: (title: string) => string; ask: string }> = {
-  simplify: { title: "Simplify", system: (t) => `You are a research assistant. The user is reading "${t}" and wants a difficult passage simplified. Rewrite it in plain, simple language. Be concise — 1 to 3 sentences.`, ask: "Simplify this text so it's easier to understand." },
-  clarify: { title: "Clarify", system: (t) => `You are a research assistant. The user is reading "${t}" and needs help understanding a highlighted passage. Explain what it means in simple, clear terms. Be concise — 1 to 3 sentences.`, ask: "Explain what this highlighted text means." },
-  example: { title: "Example", system: (t) => `You are a research assistant. The user is reading "${t}" and wants a concrete example of the concept described in a highlighted passage. Give a real-world example. Be concise — 1 to 3 sentences.`, ask: "Give a concrete example of what this text describes." },
-  recap: { title: "Recap", system: (t) => `You are a research assistant. The user is reading "${t}" and wants a brief recap of a highlighted passage. Summarize the key point in one short sentence.`, ask: "Summarize this in one sentence." },
-  graph: { title: "Graph", system: (t) => `You are a research assistant. The user is reading "${t}" and wants a diagram of the concept described in a highlighted passage. Generate Mermaid.js diagram code. Only emit the mermaid code block — no explanation.`, ask: "Create a Mermaid.js diagram for this concept." },
-  custom: { title: "Custom", system: (t) => `You are a research assistant. The user is reading "${t}". Answer their question about the highlighted passage. Be concise and helpful.`, ask: "" },
+  simplify: { title: "Simplify", system: (t) => `You are a research assistant. The user is reading "${t}" and wants a difficult passage simplified. Rewrite it in plain, simple language. ${BREVITY}`, ask: "Simplify this text so it's easier to understand." },
+  clarify: { title: "Clarify", system: (t) => `You are a research assistant. The user is reading "${t}" and needs help understanding a highlighted passage. Explain what it means in simple, clear terms. ${BREVITY}`, ask: "Explain what this highlighted text means." },
+  example: { title: "Example", system: (t) => `You are a research assistant. The user is reading "${t}" and wants a concrete example of the concept described in a highlighted passage. Give one real-world example. ${BREVITY}`, ask: "Give a concrete example of what this text describes." },
+  recap: { title: "Recap", system: (t) => `You are a research assistant. The user is reading "${t}" and wants a brief recap of a highlighted passage. Summarize the key point in a single short sentence. ${BREVITY}`, ask: "Summarize this in one sentence." },
+  graph: { title: "Graph", system: (t) => `You are a research assistant. The user is reading "${t}" and wants a diagram of the concept described in a highlighted passage. Generate Mermaid.js diagram code. Keep it to the smallest diagram that captures the concept. Only emit the mermaid code block — no explanation.`, ask: "Create a Mermaid.js diagram for this concept." },
+  custom: { title: "Custom", system: (t) => `You are a research assistant. The user is reading "${t}". Answer their question about the highlighted passage. ${BREVITY}`, ask: "" },
 };
 
 type ThreadEntry = {
@@ -360,39 +498,6 @@ function SavedBranchWindow({
   );
 }
 
-function HistoryEntryBlock({ entry, index, onDelete }: { entry: StoredEntry; index: number; onDelete: () => void }) {
-  const modeLabel = entry.mode.charAt(0).toUpperCase() + entry.mode.slice(1);
-  const ModeIcon = getModeIcon(entry.mode);
-  const htmlContent = useMemo(() => renderMarkdown(entry.answer), [entry.answer]);
-  return (
-    <div className="relative pl-4 opacity-55 group" data-entry-id={entry.id}>
-      {index > 0 && <div className="absolute left-1.5 top-0 bottom-0 w-px bg-border" />}
-      <div className="absolute left-0 top-1.5 w-3 h-3 rounded-full bg-card border-2 border-border z-[1] flex items-center justify-center">
-        <ModeIcon className="w-1.5 h-1.5 text-muted-foreground/70" />
-      </div>
-      <div className="pb-4">
-        <div className="flex items-start gap-1 mb-1">
-          <p className="text-xs text-muted-foreground/70 flex-1 min-w-0">
-            <span className="font-medium text-muted-foreground/50 mr-1">[{modeLabel} · p.{entry.page}]</span>
-            {entry.sourceHighlight && (
-              <><span className="italic">"{entry.sourceHighlight.slice(0, 60)}{entry.sourceHighlight.length > 60 ? "…" : ""}"</span><span className="mx-1">—</span></>
-            )}
-            {entry.question}
-          </p>
-          <button
-            onClick={onDelete}
-            title="Remove"
-            className="opacity-0 group-hover:opacity-100 shrink-0 p-0.5 rounded text-muted-foreground/40 hover:text-muted-foreground transition-all"
-          >
-            <X className="h-3 w-3" />
-          </button>
-        </div>
-        <div className="text-sm text-foreground/60 leading-relaxed md-content select-text" dangerouslySetInnerHTML={{ __html: htmlContent }} />
-      </div>
-    </div>
-  );
-}
-
 // ponytail: isolated single-entry view when opened from a sparkle click
 function SingleEntryBlock({ entry, isContinuation }: { entry: StoredEntry; isContinuation?: boolean }) {
   const htmlContent = useMemo(() => renderMarkdown(entry.answer), [entry.answer]);
@@ -419,10 +524,10 @@ function SingleEntryBlock({ entry, isContinuation }: { entry: StoredEntry; isCon
   );
 }
 
-export default function ClarifyPanel() {
-  const clarifyPanelOpen = useAppStore((s) => s.clarifyPanelOpen);
-  const clarifyHighlightText = useAppStore((s) => s.clarifyHighlightText);
-  const clarifyMode = useAppStore((s) => s.clarifyMode);
+export default function AiPanel() {
+  const aiPanelOpen = useAppStore((s) => s.aiPanelOpen);
+  const aiHighlightText = useAppStore((s) => s.aiHighlightText);
+  const aiMode = useAppStore((s) => s.aiMode);
   const activePaper = useAppStore((s) => s.papers.find((p) => p.filePath === s.activePaperPath));
   const currentPage = useAppStore((s) => s.currentPage);
   const llmProvider = useAppStore((s) => s.llmProvider);
@@ -436,7 +541,7 @@ export default function ClarifyPanel() {
     s.activePaperPath ? (s.conversations[s.activePaperPath] ?? null) : null
   );
   const allConversations = useAppStore((s) => s.conversations);
-  const clarifyScrollToEntryId = useAppStore((s) => s.clarifyScrollToEntryId);
+  const aiScrollToEntryId = useAppStore((s) => s.aiScrollToEntryId);
   const clearConversations = useAppStore((s) => s.clearConversations);
   const deleteConversationEntry = useAppStore((s) => s.deleteConversationEntry);
   const aiMarkers = useAppStore((s) => s.aiMarkers);
@@ -448,10 +553,10 @@ export default function ClarifyPanel() {
   useEffect(() => {
     if (docked) {
       useAppStore.setState({ rightDockWidth: docked === "right" ? size.w : 0, leftDockWidth: docked === "left" ? size.w : 0 });
-    } else if (clarifyPanelOpen) {
+    } else if (aiPanelOpen) {
       useAppStore.setState({ rightDockWidth: 0, leftDockWidth: 0 });
     }
-  }, [docked, size.w, clarifyPanelOpen]);
+  }, [docked, size.w, aiPanelOpen]);
 
   const [thread, setThread] = useState<ThreadEntry[]>([]);
   const sessionModeRef = useRef<string>("clarify");
@@ -477,13 +582,13 @@ export default function ClarifyPanel() {
   const close = useCallback(() => {
     if (abortRef.current) abortRef.current.abort();
     setOpenBranchWindows(new Set());
-    useAppStore.setState({ clarifyPanelOpen: false, clarifyHighlightText: "", clarifyHighlightRects: [], rightDockWidth: 0, leftDockWidth: 0, clarifyScrollToEntryId: null });
+    useAppStore.setState({ aiPanelOpen: false, aiHighlightText: "", aiHighlightRects: [], rightDockWidth: 0, leftDockWidth: 0, aiScrollToEntryId: null });
   }, []);
 
   // Clear branch windows when a different sparkle is clicked
   useEffect(() => {
     setOpenBranchWindows(new Set());
-  }, [clarifyScrollToEntryId]);
+  }, [aiScrollToEntryId]);
 
   // Compute initial position for a branch window based on panel layout
   const getBranchPos = useCallback((index: number) => {
@@ -511,30 +616,57 @@ export default function ClarifyPanel() {
 
   // Capture mode/page/highlight when panel opens so runStream can tag saved entries correctly
   useEffect(() => {
-    if (clarifyPanelOpen) {
-      sessionModeRef.current = useAppStore.getState().clarifyMode;
+    if (aiPanelOpen) {
+      sessionModeRef.current = useAppStore.getState().aiMode;
       sessionPageRef.current = useAppStore.getState().currentPage;
-      sessionHighlightRef.current = useAppStore.getState().clarifyHighlightText;
+      sessionHighlightRef.current = useAppStore.getState().aiHighlightText;
     }
-  }, [clarifyPanelOpen]);
+  }, [aiPanelOpen]);
 
   const runStream = useCallback(async (entryId: string, messages: ChatMessage[], meta?: { question: string; sourceHighlight?: string; skipMarker?: boolean; threadId?: string; isBranch?: boolean }) => {
     const abort = new AbortController();
     abortRef.current = abort;
+    const isGraph = sessionModeRef.current === "graph";
+    // Recap's whole purpose is a single sentence; other modes get more room
+    // so a multi-step passage doesn't get truncated mid-list.
+    const sentenceCap = sessionModeRef.current === "recap" ? 1 : 5;
     setThread((prev) => prev.map((e) => e.id === entryId ? { ...e, status: "loading" } : e));
     let accumulator = "";
     typewriterRef.current = setInterval(() => {
       setThread((prev) => prev.map((e) => {
         if (e.id !== entryId || e.status !== "loading") return e;
-        return { ...e, answer: accumulator };
+        return { ...e, answer: isGraph ? accumulator : toPlainSentences(accumulator, sentenceCap) };
       }));
     }, 8);
     try {
-      const stream = streamLlm(messages, { provider: llmProvider, model: llmModel, ollamaEndpoint, opencodeEndpoint, temperature: llmTemperature, maxTokens: llmMaxTokens });
+      const maxTokens = isGraph ? llmMaxTokens : Math.min(llmMaxTokens, SHORT_ANSWER_MAX_TOKENS);
+      {
+        // Logged as separate, shorter calls (not one giant string) because
+        // DevTools truncates very long single console.log messages — the
+        // context block alone can run into the thousands of characters.
+        // The summary line with exact char counts survives even if the
+        // context dump itself gets cut off on screen.
+        const systemMsg = messages.find((m) => m.role === "system")?.content || "";
+        const userMsg = messages.find((m) => m.role === "user")?.content || "";
+        // Context now comes first in the prompt (see buildAskContent) — the
+        // highlight section starts at this marker.
+        const highlightMarkerIdx = userMsg.indexOf("The user highlighted this exact passage");
+        const ctxPart = highlightMarkerIdx >= 0 ? userMsg.slice(0, highlightMarkerIdx) : "";
+        const highlightPart = highlightMarkerIdx >= 0 ? userMsg.slice(highlightMarkerIdx) : userMsg;
+        log.ai.debug(
+          `runStream[${sessionModeRef.current}] → ${llmProvider}/${llmModel} maxTokens=${maxTokens} | ` +
+          `system=${systemMsg.length}chars highlight+instructions=${highlightPart.length}chars context=${ctxPart.length}chars`
+        );
+        if (ctxPart) log.ai.debug(`runStream[${sessionModeRef.current}] context section:\n${ctxPart}`);
+        log.ai.debug(`runStream[${sessionModeRef.current}] highlight section:\n${highlightPart}`);
+      }
+      const stream = streamLlm(messages, { provider: llmProvider, model: llmModel, ollamaEndpoint, opencodeEndpoint, temperature: llmTemperature, maxTokens });
       for await (const chunk of stream) { if (abort.signal.aborted) return; accumulator += chunk; }
       let result: { text: string; reasoning: string } | undefined;
       try { result = (await stream.next()).value as any; } catch {}
       if (result?.text) accumulator = result.text;
+      log.ai.debug(`runStream[${sessionModeRef.current}] raw response before post-processing\n---\n${accumulator}`);
+      if (!isGraph) accumulator = toPlainSentences(accumulator, sentenceCap);
       setThread((prev) => prev.map((e) => e.id === entryId ? { ...e, answer: accumulator, status: "done" } : e));
       // Save directly here — accumulator has the final text, no effect timing issues
       if (meta && accumulator) {
@@ -553,7 +685,7 @@ export default function ClarifyPanel() {
             ...(meta.isBranch ? { isBranch: true } : {}),
           });
           // Place a sparkle marker on the page at the highlighted rects (skip for chat continuations)
-          const rects = s.clarifyHighlightRects;
+          const rects = s.aiHighlightRects;
           if (!meta.skipMarker && rects && rects.length > 0) {
             s.addAiMarker(`${paperPath}-${sessionPageRef.current}`, {
               id: entryId,
@@ -579,11 +711,11 @@ export default function ClarifyPanel() {
   }, [llmProvider, llmModel, ollamaEndpoint, opencodeEndpoint, llmTemperature, llmMaxTokens]);
 
   useEffect(() => {
-    if (!clarifyPanelOpen) {
+    if (!aiPanelOpen) {
       setThread([]); setContext(""); setCustomDraft(""); setChatDraft(""); setOpenBranchWindows(new Set()); setActiveFollowUpId(null);
       return;
     }
-    const scrollId = useAppStore.getState().clarifyScrollToEntryId;
+    const scrollId = useAppStore.getState().aiScrollToEntryId;
     if (scrollId) {
       // ponytail: load the saved entry into thread so chat input shows and user can keep chatting
       const s = useAppStore.getState();
@@ -602,9 +734,24 @@ export default function ClarifyPanel() {
       return;
     }
     const title = activePaper?.title || "Untitled";
+    const prompt = MODE_PROMPTS[aiMode] || MODE_PROMPTS.clarify;
+    const entryId = uid();
+    // Reset the thread synchronously to the new question before fetching
+    // surrounding-page context, so the panel never flashes the previous
+    // highlight's answer while this awaits.
+    setContext("");
+    setThread(
+      aiMode === "custom"
+        ? [{ id: entryId, question: "Ask about highlighted text", answer: "", status: "idle" }]
+        : [{ id: entryId, question: prompt.ask, answer: "", status: "loading" }]
+    );
     const ctxParts: string[] = [];
     (async () => {
-      for (const offset of [-2, -1, 1, 2]) {
+      // Includes offset 0 (the current page) — previously skipped, even
+      // though the rest of that page's text can be directly relevant to a
+      // highlight that's only part of it (e.g. an equation referencing
+      // something defined a few lines earlier on the same page).
+      for (const offset of [-2, -1, 0, 1, 2]) {
         const pn = currentPage + offset;
         if (pn < 1) continue;
         const t = await getPageText(pn);
@@ -612,22 +759,16 @@ export default function ClarifyPanel() {
       }
       const ctx = ctxParts.length > 0 ? ctxParts.join("\n") : "";
       setContext(ctx);
-      const prompt = MODE_PROMPTS[clarifyMode] || MODE_PROMPTS.clarify;
-      const ctxBlock = ctx ? `\n\nSurrounding context from the paper:\n${ctx}` : "";
-      if (clarifyMode === "custom") {
-        setThread([{ id: uid(), question: "Ask about highlighted text", answer: "", status: "idle" }]);
-      } else {
-        const entryId = uid();
-        setThread([{ id: entryId, question: prompt.ask, answer: "", status: "loading" }]);
+      if (aiMode !== "custom") {
         const messages: ChatMessage[] = [
           { role: "system", content: prompt.system(title) },
-          { role: "user", content: `The user highlighted this text on page ${currentPage}:\n"${clarifyHighlightText}"${ctxBlock}\n\n${prompt.ask}` },
+          { role: "user", content: buildAskContent(aiHighlightText, currentPage, ctx, prompt.ask) },
         ];
-        runStream(entryId, messages, { question: prompt.ask, sourceHighlight: clarifyHighlightText });
+        runStream(entryId, messages, { question: prompt.ask, sourceHighlight: aiHighlightText });
       }
     })();
     return () => { if (typewriterRef.current) clearInterval(typewriterRef.current); abortRef.current?.abort(); };
-  }, [clarifyPanelOpen, clarifyMode, currentPage, activePaper?.title, clarifyHighlightText, runStream]);
+  }, [aiPanelOpen, aiMode, currentPage, activePaper?.title, aiHighlightText, runStream]);
 
   // ponytail: single-entry view — no scroll needed, keep entryId until panel closes
 
@@ -648,23 +789,21 @@ export default function ClarifyPanel() {
     const entry = thread[0];
     if (entry.status !== "idle") return;
     const title = activePaper?.title || "Untitled";
-    const ctxBlock = context ? `\n\nSurrounding context from the paper:\n${context}` : "";
+    const question = customDraft.trim();
     const messages: ChatMessage[] = [
       { role: "system", content: MODE_PROMPTS.custom.system(title) },
-      { role: "user", content: `The user highlighted this text on page ${currentPage}:\n"${clarifyHighlightText}"${ctxBlock}\n\nQuestion: ${customDraft.trim()}` },
+      { role: "user", content: buildAskContent(aiHighlightText, currentPage, context, `Question: ${question}`) },
     ];
-    const question = customDraft.trim();
     setThread((prev) => prev.map((e) => e.id === entry.id ? { ...e, question, status: "loading" } : e));
     setCustomDraft("");
-    runStream(entry.id, messages, { question, sourceHighlight: clarifyHighlightText });
-  }, [customDraft, thread, context, activePaper?.title, currentPage, clarifyHighlightText, runStream]);
+    runStream(entry.id, messages, { question, sourceHighlight: aiHighlightText });
+  }, [customDraft, thread, context, activePaper?.title, currentPage, aiHighlightText, runStream]);
 
   const handleChatSend = useCallback(() => {
     if (!chatDraft.trim()) return;
     if (thread.some((e) => e.status === "loading")) return;
     const title = activePaper?.title || "Untitled";
     const prompt = MODE_PROMPTS[sessionModeRef.current] || MODE_PROMPTS.clarify;
-    const ctxBlock = context ? `\n\nSurrounding context from the paper:\n${context}` : "";
     const question = chatDraft.trim();
     const newEntryId = uid();
     // Build full conversation history so the model has context
@@ -673,7 +812,7 @@ export default function ClarifyPanel() {
     ];
     thread.forEach((e, i) => {
       if (i === 0) {
-        messages.push({ role: "user", content: `The user highlighted this text on page ${sessionPageRef.current}:\n"${sessionHighlightRef.current}"${ctxBlock}\n\n${e.question}` });
+        messages.push({ role: "user", content: buildAskContent(sessionHighlightRef.current, sessionPageRef.current, context, e.question) });
       } else {
         messages.push({ role: "user", content: e.question });
       }
@@ -714,15 +853,14 @@ export default function ClarifyPanel() {
     const branchEntryId = uid(); // ponytail: unique id so the branch survives revisit
 
     const title = activePaper?.title || "Untitled";
-    const ctxBlock = context ? `\n\nSurrounding context from the paper:\n${context}` : "";
 
     const messages: ChatMessage[] = [
-      { role: "system", content: `You are a research assistant. The user is reading "${title}". Answer concisely and helpfully.` },
+      { role: "system", content: `You are a research assistant. The user is reading "${title}". ${BREVITY}` },
     ];
 
     // Include the original highlight + surrounding context
-    if (clarifyHighlightText) {
-      messages.push({ role: "user", content: `The user highlighted this text on page ${currentPage}:\n"${clarifyHighlightText}"${ctxBlock}` });
+    if (aiHighlightText) {
+      messages.push({ role: "user", content: buildAskContent(aiHighlightText, currentPage, context) });
       // Include the parent answer for context
       messages.push({ role: "assistant", content: parent.answer });
     }
@@ -737,14 +875,15 @@ export default function ClarifyPanel() {
     onStatus("loading");
     let accumulator = "";
 
-    const interval = setInterval(() => onAnswer(accumulator), 8);
+    const interval = setInterval(() => onAnswer(toPlainSentences(accumulator)), 8);
 
     try {
-      const stream = streamLlm(messages, { provider: llmProvider, model: llmModel, ollamaEndpoint, opencodeEndpoint, temperature: llmTemperature, maxTokens: llmMaxTokens });
+      const stream = streamLlm(messages, { provider: llmProvider, model: llmModel, ollamaEndpoint, opencodeEndpoint, temperature: llmTemperature, maxTokens: Math.min(llmMaxTokens, SHORT_ANSWER_MAX_TOKENS) });
       for await (const chunk of stream) { accumulator += chunk; }
       let result: { text: string; reasoning: string } | undefined;
       try { result = (await stream.next()).value as any; } catch {}
       if (result?.text) accumulator = result.text;
+      accumulator = toPlainSentences(accumulator);
       onAnswer(accumulator);
       onStatus("done");
       // ponytail: persist the branch so it reappears when revisiting the sparkle
@@ -776,7 +915,7 @@ export default function ClarifyPanel() {
     }
 
     clearInterval(interval);
-  }, [thread, context, activePaper?.title, currentPage, clarifyHighlightText, followUpSourceHighlight, llmProvider, llmModel, ollamaEndpoint, opencodeEndpoint, llmTemperature, llmMaxTokens]);
+  }, [thread, context, activePaper?.title, currentPage, aiHighlightText, followUpSourceHighlight, llmProvider, llmModel, ollamaEndpoint, opencodeEndpoint, llmTemperature, llmMaxTokens]);
 
   // ponytail: arrow from the panel window edge, not the entry element inside it
   // ponytail: arrow endpoints for live FollowUpWindow — dynamic edges based on relative position
@@ -825,22 +964,22 @@ export default function ClarifyPanel() {
     };
     el.addEventListener("click", handler);
     return () => el.removeEventListener("click", handler);
-  }, [clarifyPanelOpen, thread]);
+  }, [aiPanelOpen, thread]);
 
   const singleEntry = useMemo(() => {
-    if (!clarifyScrollToEntryId) return null;
+    if (!aiScrollToEntryId) return null;
     // try current document first
     if (savedConversations) {
-      const found = savedConversations.find((e) => e.id === clarifyScrollToEntryId);
+      const found = savedConversations.find((e) => e.id === aiScrollToEntryId);
       if (found) return found;
     }
     // fallback: search every document's conversations (handles path mismatch)
     for (const entries of Object.values(allConversations)) {
-      const found = entries.find((e) => e.id === clarifyScrollToEntryId);
+      const found = entries.find((e) => e.id === aiScrollToEntryId);
       if (found) return found;
     }
     return null;
-  }, [clarifyScrollToEntryId, savedConversations, allConversations]);
+  }, [aiScrollToEntryId, savedConversations, allConversations]);
 
   // ponytail: split into inline continuations (chat follow-ups) and floating branches (Branch button)
   const continuations = useMemo(() => {
@@ -868,16 +1007,15 @@ export default function ClarifyPanel() {
   const isSingleEntryView = !!singleEntry;
   const headerLabel = isSingleEntryView
     ? `${singleEntry.mode.charAt(0).toUpperCase() + singleEntry.mode.slice(1)} · p.${singleEntry.page}`
-    : (MODE_PROMPTS[clarifyMode]?.title || "Clarify");
-  if (!clarifyPanelOpen) return null;
+    : (MODE_PROMPTS[aiMode]?.title || "Clarify");
+  if (!aiPanelOpen) return null;
   const isStreaming = thread.some((e) => e.status === "loading");
-  const threadIds = new Set(thread.map((e) => e.id));
-  const historyToShow = savedConversations ? savedConversations.filter((e) => !threadIds.has(e.id)) : [];
+  const hasSavedHistory = !!savedConversations && savedConversations.length > 0;
 
   return (
     <>
       <AnimatePresence>
-        {clarifyPanelOpen && (
+        {aiPanelOpen && (
           <motion.div
             ref={panelRef}
             key="clarify"
@@ -894,7 +1032,7 @@ export default function ClarifyPanel() {
           >
             <div className="shrink-0 flex items-center gap-2 px-3 py-2 border-b border-border cursor-grab active:cursor-grabbing select-none" onMouseDown={onDragMouseDown}>
               <GripHorizontal className="h-3.5 w-3.5 text-muted-foreground" />
-              {(() => { const ModeIcon = isSingleEntryView ? getModeIcon(singleEntry.mode) : getModeIcon(clarifyMode); return <ModeIcon className="h-3.5 w-3.5 text-muted-foreground" />; })()}
+              {(() => { const ModeIcon = isSingleEntryView ? getModeIcon(singleEntry.mode) : getModeIcon(aiMode); return <ModeIcon className="h-3.5 w-3.5 text-muted-foreground" />; })()}
               <span className="text-xs font-medium text-foreground flex-1">{headerLabel}</span>
               {isSingleEntryView && branchEntries.length > 0 && (
                 <button
@@ -928,12 +1066,12 @@ export default function ClarifyPanel() {
                   <Trash2 className="h-3.5 w-3.5" />
                 </button>
               )}
-              {clarifyScrollToEntryId && !singleEntry && (
+              {aiScrollToEntryId && !singleEntry && (
                 <button
                   onMouseDown={(e) => e.stopPropagation()}
                   onClick={(e) => {
                     e.stopPropagation();
-                    deleteOrphanedMarker(clarifyScrollToEntryId);
+                    deleteOrphanedMarker(aiScrollToEntryId);
                   }}
                   title="Remove sparkle marker"
                   className="p-0.5 rounded text-muted-foreground hover:text-red-500 hover:bg-secondary transition-colors"
@@ -941,11 +1079,11 @@ export default function ClarifyPanel() {
                   <Trash2 className="h-3.5 w-3.5" />
                 </button>
               )}
-              {!isSingleEntryView && activePaperPath && historyToShow.length > 0 && (
+              {!isSingleEntryView && activePaperPath && hasSavedHistory && (
                 <button
                   onMouseDown={(e) => e.stopPropagation()}
                   onClick={(e) => { e.stopPropagation(); clearConversations(activePaperPath); close(); }}
-                  title="Clear history"
+                  title="Clear all AI history for this paper"
                   className="p-0.5 rounded text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
                 >
                   <Trash2 className="h-3.5 w-3.5" />
@@ -964,7 +1102,7 @@ export default function ClarifyPanel() {
             )}
             <div ref={outerRef} className="flex-1 overflow-hidden flex flex-col">
               <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-3">
-                {clarifyScrollToEntryId && !singleEntry ? (
+                {aiScrollToEntryId && !singleEntry ? (
                   <p className="text-xs text-muted-foreground/50 italic mt-2">
                     Conversation not found — it may have been deleted or the storage data is missing.
                   </p>
@@ -976,39 +1114,18 @@ export default function ClarifyPanel() {
                     ))}
                   </div>
                 ) : (
-                  <>
-                    {historyToShow.length > 0 && (
-                      <div className="mb-2">
-                        {historyToShow.map((entry, i) => (
-                          <HistoryEntryBlock
-                            key={entry.id}
-                            entry={entry}
-                            index={i}
-                            onDelete={() => {
-                              if (activePaperPath) deleteConversationEntry(activePaperPath, entry.id);
-                            }}
-                          />
-                        ))}
-                        <div className="flex items-center gap-2 my-3">
-                          <div className="flex-1 h-px bg-border" />
-                          <span className="text-xs text-muted-foreground/40 select-none">new session</span>
-                          <div className="flex-1 h-px bg-border" />
-                        </div>
-                      </div>
-                    )}
-                    {thread.map((entry, i) => (
-                      <ThreadEntryBlock
-                        key={entry.id}
-                        entry={entry}
-                        index={i}
-                        onAnswerSelect={handleAnswerSelect}
-                        entryRef={(el) => { if (el) entryRefs.current.set(entry.id, el); else entryRefs.current.delete(entry.id); }}
-                      />
-                    ))}
-                  </>
+                  thread.map((entry, i) => (
+                    <ThreadEntryBlock
+                      key={entry.id}
+                      entry={entry}
+                      index={i}
+                      onAnswerSelect={handleAnswerSelect}
+                      entryRef={(el) => { if (el) entryRefs.current.set(entry.id, el); else entryRefs.current.delete(entry.id); }}
+                    />
+                  ))
                 )}
               </div>
-              {clarifyMode === "custom" && thread.length > 0 && thread[0].status === "idle" ? (
+              {aiMode === "custom" && thread.length > 0 && thread[0].status === "idle" ? (
                 <div className="shrink-0 border-t border-border px-4 py-3">
                   <div className="flex flex-col gap-2">
                     <textarea

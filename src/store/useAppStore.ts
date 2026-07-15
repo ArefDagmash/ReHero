@@ -100,11 +100,11 @@ type AppState = {
   paperTextIndexVersion: number;
   rightDockWidth: number;
   leftDockWidth: number;
-  clarifyPanelOpen: boolean;
-  clarifyHighlightText: string;
-  clarifyHighlightRects: { x: number; y: number; w: number; h: number }[];
-  clarifyMode: "clarify" | "simplify" | "example" | "recap" | "custom" | "graph";
-  clarifyScrollToEntryId: string | null;
+  aiPanelOpen: boolean;
+  aiHighlightText: string;
+  aiHighlightRects: { x: number; y: number; w: number; h: number }[];
+  aiMode: "clarify" | "simplify" | "example" | "recap" | "custom" | "graph";
+  aiScrollToEntryId: string | null;
 
   currentDoodleRects: DoodleRect[];
   pinnedDoodles: Record<string, PinnedDoodle[]>;
@@ -148,6 +148,8 @@ type AppState = {
   setLlmTemperature: (temperature: number) => void;
   setLlmMaxTokens: (maxTokens: number) => void;
   setSidebarTab: (tab: "home" | "papers" | "books" | "explore" | "achievements" | "settings") => void;
+  fontScale: number;
+  setFontScale: (scale: number) => void;
   addPinnedDoodle: (key: string, doodle: PinnedDoodle) => void;
   removePinnedDoodle: (key: string, id: string) => void;
   updatePinnedNote: (key: string, id: string, note: string) => void;
@@ -169,6 +171,8 @@ type AppState = {
   clearConversations: (filePath: string) => void;
   removePaper: (id: string) => void;
   removeBook: (id: string) => void;
+  addTag: (paperId: string, tag: string) => void;
+  removeTag: (paperId: string, tag: string) => void;
 };
 
 export const useAppStore = create<AppState>()(
@@ -195,11 +199,11 @@ export const useAppStore = create<AppState>()(
       paperTextIndexVersion: 0,
       rightDockWidth: 0,
       leftDockWidth: 0,
-      clarifyPanelOpen: false,
-      clarifyHighlightText: "",
-      clarifyHighlightRects: [],
-      clarifyMode: "clarify",
-      clarifyScrollToEntryId: null,
+      aiPanelOpen: false,
+      aiHighlightText: "",
+      aiHighlightRects: [],
+      aiMode: "clarify",
+      aiScrollToEntryId: null,
 
       currentDoodleRects: [],
       pinnedDoodles: {},
@@ -218,6 +222,7 @@ export const useAppStore = create<AppState>()(
       llmTemperature: 0.7,
       llmMaxTokens: 8192,
       sidebarTab: "home",
+      fontScale: 16,
 
       gamification: {
         xp: 0,
@@ -457,6 +462,7 @@ export const useAppStore = create<AppState>()(
       setLlmTemperature: (llmTemperature) => set({ llmTemperature }),
       setLlmMaxTokens: (llmMaxTokens) => set({ llmMaxTokens }),
       setSidebarTab: (sidebarTab) => set({ sidebarTab }),
+      setFontScale: (fontScale) => set({ fontScale }),
 
       addPinnedDoodle: (key, doodle) => {
         set((state) => ({
@@ -656,6 +662,34 @@ export const useAppStore = create<AppState>()(
         set({ conversations: convs });
         saveConversations(convs);
       },
+
+      addTag: (paperId, tag) => {
+        const trimmed = tag.trim().toLowerCase();
+        if (!trimmed) return;
+        set((state) => ({
+          papers: state.papers.map((p) =>
+            p.id === paperId && !p.tags.includes(trimmed)
+              ? { ...p, tags: [...p.tags, trimmed] }
+              : p,
+          ),
+          books: state.books.map((b) =>
+            b.id === paperId && !b.tags.includes(trimmed)
+              ? { ...b, tags: [...b.tags, trimmed] }
+              : b,
+          ),
+        }));
+      },
+
+      removeTag: (paperId, tag) => {
+        set((state) => ({
+          papers: state.papers.map((p) =>
+            p.id === paperId ? { ...p, tags: p.tags.filter((t) => t !== tag) } : p,
+          ),
+          books: state.books.map((b) =>
+            b.id === paperId ? { ...b, tags: b.tags.filter((t) => t !== tag) } : b,
+          ),
+        }));
+      },
     }),
     {
       name: "research-reader-papers",
@@ -678,6 +712,7 @@ export const useAppStore = create<AppState>()(
         llmTemperature: state.llmTemperature,
         llmMaxTokens: state.llmMaxTokens,
         sidebarTab: state.sidebarTab,
+        fontScale: state.fontScale,
         gamification: state.gamification,
       }),
       onRehydrateStorage: () => {

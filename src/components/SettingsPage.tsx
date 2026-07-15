@@ -31,6 +31,8 @@ function SettingsPage() {
   const setLlmMaxTokens = useAppStore((s) => s.setLlmMaxTokens);
   const zoom = useAppStore((s) => s.zoom);
   const setZoom = useAppStore((s) => s.setZoom);
+  const fontScale = useAppStore((s) => s.fontScale);
+  const setFontScale = useAppStore((s) => s.setFontScale);
   const rightDockWidth = useAppStore((s) => s.rightDockWidth);
   const leftDockWidth = useAppStore((s) => s.leftDockWidth);
 
@@ -92,7 +94,16 @@ function SettingsPage() {
             </div>
             <div className={rowClass}>
               <span className={labelClass}>Font size</span>
-              <span className="text-sm text-muted-foreground/50 italic">Coming soon</span>
+              <input
+                type="range"
+                min={12}
+                max={30}
+                step={1}
+                value={fontScale}
+                onChange={(e) => { const v = Number(e.target.value); setFontScale(v); document.documentElement.style.fontSize = `${v}px`; }}
+                className="flex-1 h-1.5 rounded-full bg-secondary appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3.5 [&::-webkit-slider-thumb]:h-3.5 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-foreground [&::-webkit-slider-thumb]:cursor-pointer"
+              />
+              <span className="text-xs text-muted-foreground tabular-nums w-8 text-right">{fontScale}px</span>
             </div>
           </SettingGroup>
 

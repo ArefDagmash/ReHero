@@ -3,7 +3,7 @@ import * as pdfjsLib from "pdfjs-dist";
 import pdfjsWorker from "pdfjs-dist/build/pdf.worker.mjs?url";
 import { motion, AnimatePresence } from "framer-motion";
 import rough from "roughjs";
-import { ChevronLeft, ChevronRight, Minus, Plus, Settings2, Pencil, Sparkles, Volume2, Loader2, X, MessageSquareText } from "lucide-react";
+import { ChevronLeft, ChevronRight, Minus, Plus, Settings2, Pencil, Sparkles, Volume2, Loader2, X, MessageSquareText, Tag, Bot } from "lucide-react";
 import { loadPdf as loadPdfFromIdb } from "@/lib/pdfStorage";
 import { useAppStore } from "@/store/useAppStore";
 import { log } from "@/lib/logger";
@@ -14,6 +14,7 @@ import { streamLlm } from "@/lib/llmStream";
 import { buildNarrationMessages, synthesizeSpeechBlob, playAudioBlob, stopSpeaking } from "@/lib/narrator";
 import { saveNarration, loadNarration, deleteNarration, savePlaybackPosition, loadPlaybackPosition, type SavedNarration } from "@/lib/narrationStorage";
 import MiniAudioPlayer from "@/components/MiniAudioPlayer";
+import LlmModelPicker from "@/components/LlmModelPicker";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
 
@@ -98,12 +99,14 @@ function Reader(_props: ReaderProps) {
   const aiMarkers = useAppStore((s) => s.aiMarkers);
   const rightDockWidth = useAppStore((s) => s.rightDockWidth);
   const leftDockWidth = useAppStore((s) => s.leftDockWidth);
-  const clarifyPanelOpen = useAppStore((s) => s.clarifyPanelOpen);
-  const clarifyHighlightRects = useAppStore((s) => s.clarifyHighlightRects);
+  const aiPanelOpen = useAppStore((s) => s.aiPanelOpen);
+  const aiHighlightRects = useAppStore((s) => s.aiHighlightRects);
   const activePaper = useAppStore((s) =>
     s.papers.find((p) => p.filePath === s.activePaperPath) ??
     s.books.find((b) => b.filePath === s.activePaperPath),
   );
+  const addTag = useAppStore((s) => s.addTag);
+  const removeTag = useAppStore((s) => s.removeTag);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const textLayerRef = useRef<HTMLDivElement>(null);
@@ -132,6 +135,11 @@ function Reader(_props: ReaderProps) {
   const [narrateReadingPage, setNarrateReadingPage] = useState<number | null>(null);
   const [savedNarration, setSavedNarration] = useState<SavedNarration | null>(null);
   const [narrateSynthEta, setNarrateSynthEta] = useState<number | null>(null);
+  const [narrateMenuOpen, setNarrateMenuOpen] = useState(false);
+  const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  const [showTagInput, setShowTagInput] = useState(false);
+  const [tagInputText, setTagInputText] = useState("");
+  const tagInputRef = useRef<HTMLInputElement>(null);
   const narrateAudioRef = useRef<HTMLAudioElement | null>(null);
   const pageBoundariesRef = useRef<{ page: number; startFrac: number }[]>([]);
   const ttsRateRef = useRef<number | null>(null);
@@ -549,6 +557,20 @@ function Reader(_props: ReaderProps) {
   }, [settingsOpen]);
 
   useEffect(() => {
+    if (!narrateMenuOpen) return;
+    const close = () => setNarrateMenuOpen(false);
+    window.addEventListener("mousedown", close);
+    return () => window.removeEventListener("mousedown", close);
+  }, [narrateMenuOpen]);
+
+  useEffect(() => {
+    if (!modelPickerOpen) return;
+    const close = () => setModelPickerOpen(false);
+    window.addEventListener("mousedown", close);
+    return () => window.removeEventListener("mousedown", close);
+  }, [modelPickerOpen]);
+
+  useEffect(() => {
     if (!editNoteId) return;
     const save = () => {
       setEditNoteId((id) => {
@@ -736,7 +758,26 @@ function Reader(_props: ReaderProps) {
     >
       {/* Slim top bar */}
       <div className="h-12 flex items-center justify-between px-3 shrink-0 select-none relative">
-        <div />
+        <div className="flex items-center gap-1 min-w-0 max-w-[40%]">
+          {(activePaper?.tags || []).map((tag) => (
+            <button
+              key={tag}
+              onClick={() => activePaper && removeTag(activePaper.id, tag)}
+              className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] bg-secondary/60 text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors group/tag shrink-0"
+              title="Click to remove"
+            >
+              {tag}
+              <X className="h-2.5 w-2.5 opacity-0 group-hover/tag:opacity-100 transition-opacity" />
+            </button>
+          ))}
+          <button
+            onClick={() => { setShowTagInput(!showTagInput); setTagInputText(""); setTimeout(() => tagInputRef.current?.focus(), 50); }}
+            className="p-0.5 rounded text-muted-foreground/30 hover:text-muted-foreground transition-colors shrink-0"
+            title="Add tag"
+          >
+            <Tag className="h-3.5 w-3.5" />
+          </button>
+        </div>
 
         <span className="text-sm text-muted-foreground tabular-nums font-medium absolute left-1/2 -translate-x-1/2">
           {currentPage} / {totalPages}
@@ -833,30 +874,50 @@ function Reader(_props: ReaderProps) {
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
                 transition={{ duration: 0.15 }}
-                className="flex items-center gap-1"
+                className="relative"
               >
                 <button
-                  onClick={resumeSavedNarration}
-                  title={`Play saved narration (pages ${savedNarration.from}–${savedNarration.to})`}
-                  className="flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-sm text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onClick={() => setNarrateMenuOpen((v) => !v)}
+                  title={`Saved narration (pages ${savedNarration.from}–${savedNarration.to})`}
+                  className="p-1.5 rounded-lg text-indigo-500 hover:text-indigo-600 hover:bg-secondary transition-colors"
                 >
                   <Volume2 className="h-4 w-4" />
-                  <span className="hidden sm:inline">Resume {savedNarration.from}–{savedNarration.to}</span>
                 </button>
-                <button
-                  onClick={openRangePicker}
-                  title="Narrate a different range"
-                  className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
-                >
-                  <Plus className="h-3.5 w-3.5" />
-                </button>
-                <button
-                  onClick={discardSavedNarration}
-                  title="Discard saved narration"
-                  className="p-1 rounded hover:bg-secondary transition-colors"
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
+                <AnimatePresence>
+                  {narrateMenuOpen && (
+                    <motion.div
+                      initial={{ opacity: 0, y: -4 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -4 }}
+                      transition={{ duration: 0.15 }}
+                      className="absolute right-0 top-full mt-1 bg-card border border-border rounded-xl shadow-lg py-1 flex flex-col z-50 whitespace-nowrap"
+                      onMouseDown={(e) => e.stopPropagation()}
+                    >
+                      <button
+                        onClick={() => { setNarrateMenuOpen(false); resumeSavedNarration(); }}
+                        className="flex items-center gap-2 px-3 py-1.5 text-sm text-left hover:bg-secondary transition-colors"
+                      >
+                        <Volume2 className="h-3.5 w-3.5" />
+                        Resume {savedNarration.from}–{savedNarration.to}
+                      </button>
+                      <button
+                        onClick={() => { setNarrateMenuOpen(false); openRangePicker(); }}
+                        className="flex items-center gap-2 px-3 py-1.5 text-sm text-left hover:bg-secondary transition-colors"
+                      >
+                        <Plus className="h-3.5 w-3.5" />
+                        Narrate a different range
+                      </button>
+                      <button
+                        onClick={() => { setNarrateMenuOpen(false); discardSavedNarration(); }}
+                        className="flex items-center gap-2 px-3 py-1.5 text-sm text-left text-red-500 hover:bg-secondary transition-colors"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                        Discard saved narration
+                      </button>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
               </motion.div>
             ) : (
               <motion.div
@@ -937,6 +998,32 @@ function Reader(_props: ReaderProps) {
           >
             <MessageSquareText className="h-4 w-4" />
           </button>
+
+          <div className="relative">
+            <button
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={() => setModelPickerOpen((v) => !v)}
+              className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
+              title="AI model"
+            >
+              <Bot className="h-4 w-4" />
+            </button>
+
+            <AnimatePresence>
+              {modelPickerOpen && (
+                <motion.div
+                  initial={{ opacity: 0, y: -4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -4 }}
+                  transition={{ duration: 0.15 }}
+                  className="absolute right-0 top-full mt-1 w-72 bg-card border border-border rounded-xl shadow-lg p-3 z-50"
+                  onMouseDown={(e) => e.stopPropagation()}
+                >
+                  <LlmModelPicker compact />
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
 
           <div className="relative ml-1">
             <button
@@ -1094,6 +1181,35 @@ function Reader(_props: ReaderProps) {
         </div>
       </div>
 
+      {/* Inline tag input */}
+      <AnimatePresence>
+        {showTagInput && activePaper && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            className="px-3 pb-2 pt-0 overflow-hidden"
+          >
+            <input
+              ref={tagInputRef}
+              value={tagInputText}
+              onChange={(e) => setTagInputText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && tagInputText.trim()) {
+                  addTag(activePaper.id, tagInputText.trim());
+                  setTagInputText("");
+                  setShowTagInput(false);
+                }
+                if (e.key === "Escape") { setShowTagInput(false); setTagInputText(""); }
+              }}
+              onBlur={() => { setShowTagInput(false); setTagInputText(""); }}
+              placeholder="new tag..."
+              className="w-full max-w-[200px] px-2 py-1 text-xs bg-background border border-border rounded-md outline-none focus:ring-1 focus:ring-ring"
+            />
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Reading progress */}
       {totalPages > 0 && (
         <ProgressBar value={(currentPage / totalPages) * 100} className="shrink-0 rounded-none" variant="accent" />
@@ -1166,9 +1282,9 @@ function Reader(_props: ReaderProps) {
                   <canvas ref={canvasRef} className="block" />
                   <div ref={textLayerRef} className="pdf-text-layer" />
                   {/* ponytail: persistent highlight while AI panel is open */}
-                  {clarifyPanelOpen && clarifyHighlightRects.length > 0 && (
+                  {aiPanelOpen && aiHighlightRects.length > 0 && (
                     <div className="absolute inset-0 pointer-events-none z-[5]">
-                      {clarifyHighlightRects.map((r, i) => (
+                      {aiHighlightRects.map((r, i) => (
                         <div
                           key={i}
                           className="absolute bg-yellow-300/40 mix-blend-multiply"
@@ -1275,7 +1391,7 @@ function Reader(_props: ReaderProps) {
                       </div>
                     );
                   })}
-                  {/* ponytail: sparkle marker, click to open ClarifyPanel scrolled to matching history entry */}
+                  {/* ponytail: sparkle marker, click to open AiPanel scrolled to matching history entry */}
                   {(() => {
                     // Best estimate of the text column's right edge: take the widest right edge
                     // from any multi-line marker on this page (multi-line selections span full lines
@@ -1311,16 +1427,16 @@ function Reader(_props: ReaderProps) {
                           e.stopPropagation();
                           const scale = m.zoom > 0 ? zoom / m.zoom : 1;
                           useAppStore.setState({
-                            clarifyPanelOpen: true,
-                            clarifyScrollToEntryId: m.id,
-                            clarifyHighlightRects: m.rects.map((r) => ({
+                            aiPanelOpen: true,
+                            aiScrollToEntryId: m.id,
+                            aiHighlightRects: m.rects.map((r) => ({
                               x: r.x * scale,
                               y: r.y * scale,
                               w: r.w * scale,
                               h: r.h * scale,
                             })),
-                            clarifyHighlightText: m.text || "",
-                            clarifyMode: "clarify",
+                            aiHighlightText: m.text || "",
+                            aiMode: "clarify",
                           });
                         }}
                         className="absolute z-20 opacity-60 hover:opacity-100 transition-opacity cursor-pointer"

@@ -66,7 +66,13 @@ function buildPayload(
   inputCtx?: number,
 ): string {
   if (provider === "ollama") {
-    const body: any = { model, messages, temperature, stream };
+    // Reasoning-capable models (e.g. gemma4) can burn the entire maxTokens
+    // budget on invisible "thinking" content before ever writing to the
+    // visible `content` field — the streaming parser below only reads
+    // `message.content`, so that showed up as a silently empty response.
+    // Disabling thinking is strictly better here: faster, and the app never
+    // wants chain-of-thought, only the final answer.
+    const body: any = { model, messages, temperature, stream, think: false };
     if (maxTokens) body.options = { num_predict: maxTokens };
     if (inputCtx) body.options = { ...body.options, num_ctx: inputCtx };
     return JSON.stringify(body);
@@ -126,6 +132,14 @@ export async function* streamLlm(
           if (p.message?.content) {
             fullText += p.message.content;
             yield p.message.content;
+          }
+          // Defensive: think:false should suppress this, but if a model or
+          // older Ollama server ignores it, at least surface something
+          // useful via the empty-response diagnostic below instead of a
+          // silent blank.
+          if (p.message?.thinking) {
+            reasoningText += p.message.thinking;
+            config.onReasoning?.(p.message.thinking);
           }
         } catch {}
       }

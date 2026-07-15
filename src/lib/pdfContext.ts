@@ -1,4 +1,4 @@
-// ponytail: singleton ref for ClarifyPanel to extract page text without re-loading PDF
+// ponytail: singleton ref for AiPanel to extract page text without re-loading PDF
 import type { PDFDocumentProxy, TextItem } from "pdfjs-dist";
 
 let _doc: PDFDocumentProxy | null = null;

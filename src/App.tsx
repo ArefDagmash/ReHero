@@ -8,7 +8,7 @@ import SettingsPage from "@/components/SettingsPage";
 import HighlightMenu from "@/components/HighlightMenu";
 import ImageSearchPanel from "@/components/ImageSearchPanel";
 import DrawingPanel from "@/components/DrawingPanel";
-import ClarifyPanel from "@/components/ClarifyPanel";
+import AiPanel from "@/components/AiPanel";
 import AnnotationPanel from "@/components/AnnotationPanel";
 import SearchPanel from "@/components/SearchPanel";
 import Sidebar from "@/components/Sidebar";
@@ -26,16 +26,15 @@ function App() {
   const bookCount = useAppStore((s) => s.books.length);
   const isEmpty = paperCount === 0 && bookCount === 0;
   const bgTheme = useAppStore((s) => s.bgTheme);
+  const fontScale = useAppStore((s) => s.fontScale);
 
-  // Applied here (always mounted) rather than per-page — it used to live
-  // in a useEffect duplicated across Reader/HomePage/SettingsPage, so
-  // landing directly on any page without that effect (e.g. Explore or
-  // Achievements, or a refresh that restores straight into one of them)
-  // never set the theme attribute at all, silently falling back to the
-  // browser default (light).
   useEffect(() => {
     document.documentElement.dataset.theme = bgTheme;
   }, [bgTheme]);
+
+  useEffect(() => {
+    document.documentElement.style.fontSize = `${fontScale}px`;
+  }, [fontScale]);
 
   // One-time catch-up scan (mainly for papers added before full-text search
   // existed — new adds index themselves via addPaper.ts) — delayed so it
@@ -94,7 +93,7 @@ function App() {
       <HighlightMenu />
       <ImageSearchPanel />
       <DrawingPanel />
-      <ClarifyPanel />
+      <AiPanel />
       <AnnotationPanel />
       <SearchPanel />
       <XPToast />
