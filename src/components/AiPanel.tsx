@@ -40,7 +40,25 @@ function uid() { return Math.random().toString(36).slice(2, 9); }
 // a small token ceiling (SHORT_ANSWER_MAX_TOKENS) and toPlainSentences()
 // below, which strips any markdown structure the model produces and caps
 // the result at 2 sentences no matter what the model actually sent back.
-const BREVITY = "Be as short as possible without losing the specific substance of the highlighted passage: 1 short sentence for a single idea, up to 3 only if the passage covers multiple distinct steps, components, or numbers — never more, and never pad to reach that limit. Every sentence must reference something concrete from the highlighted passage (a specific method, name, number, or step) — do not write vague filler like \"this describes a system for X\" or \"the paper covers several topics.\" The reader is already reading this paper — never describe the paper or system at a meta level (\"This research proposes...\", \"This paper describes...\", \"The system is designed to...\"); jump straight into what the highlighted passage actually says, like you're answering \"what does this mean\" not \"what is this paper about.\" Plain prose only — never use markdown headers, bullet points, numbered lists, or bold section titles, no matter how long or complex the source text is. If the passage contains a formula or equation, never reproduce it in LaTeX (no $...$, no \\text{}, no \\frac{}{}) — write it in plain text instead, like \"true positives divided by true positives plus false positives\" or \"TP / (TP + FP).\" No preamble, no restating the question, no filler like \"Sure,\" \"Certainly,\" or \"Here is a summary,\" no closing recap — just the answer, nothing else.";
+//
+// Split into a mode-agnostic STYLE_RULES (length/formatting/no-preamble)
+// and a per-goal FOCUS clause. Every mode used to share one combined
+// instruction whose FOCUS half said "answer what this passage means, not
+// what the paper is about" — correct for Simplify/Clarify/Recap, but it
+// actively fought Example mode: told to both "give an example" AND
+// "explain what the passage says," models resolved the conflict by just
+// re-explaining the passage instead of inventing an illustration. Verified
+// against real Ollama output before splitting this — one run gave a real
+// example, the next just restated the passage, confirming the conflict
+// caused inconsistent (not just occasionally-noncompliant) behavior.
+const STYLE_RULES = "Be as short as possible: 1 short sentence for a single idea, up to 3 only if truly necessary — never more, and never pad to reach that limit. Plain prose only — never use markdown headers, bullet points, numbered lists, or bold section titles, no matter how long or complex the source text is. If a formula or equation is involved, never reproduce it in LaTeX (no $...$, no \\text{}, no \\frac{}{}) — write it in plain text instead, like \"true positives divided by true positives plus false positives\" or \"TP / (TP + FP).\" The reader is already reading this paper — never describe the paper or system at a meta level (\"This research proposes...\", \"This paper describes...\", \"The system is designed to...\"). No preamble, no restating the question, no filler like \"Sure,\" \"Certainly,\" or \"Here is a summary,\" no closing recap — just the answer, nothing else.";
+
+const EXPLAIN_FOCUS = "Every sentence must reference something concrete from the highlighted passage (a specific method, name, number, or step) — do not write vague filler like \"this describes a system for X\" or \"the paper covers several topics.\" Jump straight into what the highlighted passage actually says, like you're answering \"what does this mean\" not \"what is this paper about.\"";
+
+const EXAMPLE_FOCUS = "Invent ONE concrete, illustrative scenario that shows the concept from the highlighted passage in action — with specific plausible numbers or details if it involves a formula, metric, or process. Do not restate, re-explain, or describe what the passage says, that is a different mode — give a new, standalone example the reader can picture, using the passage's own terms (method names, metrics) so it's clearly connected.";
+
+const BREVITY = `${EXPLAIN_FOCUS} ${STYLE_RULES}`;
+const EXAMPLE_BREVITY = `${EXAMPLE_FOCUS} ${STYLE_RULES}`;
 
 // Hard ceiling for every mode except graph (which needs room for diagram
 // code). This backstops BREVITY for models that don't follow instructions.
@@ -173,7 +191,7 @@ function buildAskContent(highlightText: string, page: number, ctx: string, instr
 const MODE_PROMPTS: Record<string, { title: string; system: (title: string) => string; ask: string }> = {
   simplify: { title: "Simplify", system: (t) => `You are a research assistant. The user is reading "${t}" and wants a difficult passage simplified. Rewrite it in plain, simple language. ${BREVITY}`, ask: "Simplify this text so it's easier to understand." },
   clarify: { title: "Clarify", system: (t) => `You are a research assistant. The user is reading "${t}" and needs help understanding a highlighted passage. Explain what it means in simple, clear terms. ${BREVITY}`, ask: "Explain what this highlighted text means." },
-  example: { title: "Example", system: (t) => `You are a research assistant. The user is reading "${t}" and wants a concrete example of the concept described in a highlighted passage. Give one real-world example. ${BREVITY}`, ask: "Give a concrete example of what this text describes." },
+  example: { title: "Example", system: (t) => `You are a research assistant. The user is reading "${t}" and wants a concrete example of the concept described in a highlighted passage. ${EXAMPLE_BREVITY}`, ask: "Give a concrete example of what this text describes." },
   recap: { title: "Recap", system: (t) => `You are a research assistant. The user is reading "${t}" and wants a brief recap of a highlighted passage. Summarize the key point in a single short sentence. ${BREVITY}`, ask: "Summarize this in one sentence." },
   graph: { title: "Graph", system: (t) => `You are a research assistant. The user is reading "${t}" and wants a diagram of the concept described in a highlighted passage. Generate Mermaid.js diagram code. Keep it to the smallest diagram that captures the concept. Only emit the mermaid code block — no explanation.`, ask: "Create a Mermaid.js diagram for this concept." },
   custom: { title: "Custom", system: (t) => `You are a research assistant. The user is reading "${t}". Answer their question about the highlighted passage. ${BREVITY}`, ask: "" },
