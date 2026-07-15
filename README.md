@@ -1,3 +1,5 @@
+![ReHero — the modern paper reader](public/readme-banner.png)
+
 # ReHero
 
 A PDF reader for research papers that adds AI explanations, hand-drawn annotations, and a sketchpad — all running locally on your own machine.
