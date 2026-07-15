@@ -12,6 +12,13 @@ dist
 dist-ssr
 *.local
 
+# Secrets — nothing here currently, but keep it that way
+.env
+.env.*
+*.pem
+*.key
+credentials*.json
+
 # Rust build output
 src-tauri/target
 
