@@ -25,6 +25,9 @@ src-tauri/target
 # Python bytecode cache
 __pycache__
 
+# Kokoro TTS venv (created by start_kokoro.sh, not committed)
+.venv-kokoro
+
 # graphify analysis tool output (local dev aid, not project source)
 graphify-out
 

@@ -1,0 +1,11 @@
+# Dependencies for kokoro_server.py, the optional local TTS server behind
+# ReHero's audio narration feature. Everything else in the app works
+# without this. Install into a dedicated venv (see start_kokoro.sh) rather
+# than your system Python.
+#
+# Also requires the `ffmpeg` binary on your PATH (not pip-installable) —
+# install it via your system package manager (e.g. apt/dnf/brew).
+kokoro
+torch
+soundfile
+numpy

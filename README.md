@@ -10,10 +10,25 @@ Reading a dense paper usually means bouncing between the PDF and a search engine
 
 It's local-first: your papers, notes, and API keys stay on your machine. You bring your own AI provider (a local Ollama model, or a Claude/OpenAI/OpenCode API key), so there's no account or subscription. It runs as a normal web app or as a desktop app (via Tauri).
 
+## Features
+
+**Ask AI, inline.** Highlight anything and get it simplified, clarified, given a concrete example, recapped in one sentence, or turned into a Mermaid diagram — without leaving the page.
+
+**Hand-drawn annotations.** Underline, strike through, or squiggle text in a rough, sketch-like style, with adjustable color, stroke count, and sloppiness.
+
+**Sketch canvas.** A full Excalidraw board docked to the side. Push any highlight, AI answer, or generated diagram straight onto it to work through an idea visually.
+
+**Audio narration.** Turns a page range into narrated audio through a local Kokoro TTS server, one page at a time, with the model instructed to read formulas and symbols out loud in words rather than raw notation. Narrations are saved per paper, so playback picks up exactly where you left off from the home screen.
+
+**Explore.** Describe what you're looking for in a sentence and it searches arXiv, then scores and ranks every result against what you actually asked for with an AI classifier, followed by a second head-to-head pass to reorder the top matches. Also searches open-access books via DOAB, and pulls in citation counts from Semantic Scholar.
+
+**Scholar XP.** A 7-tier level system (Newcomer through Archivist) and 18 achievements for actual reading behavior — asking questions, annotating, finishing papers, keeping a daily reading streak.
+
 ## Requirements
 
 - [Node.js](https://nodejs.org/) 18+
 - An AI provider to use the "Ask AI" features: either [Ollama](https://ollama.com/) running locally, or an API key for Anthropic, OpenAI, or OpenCode (entered in Settings — no `.env` file needed)
+- To use audio narration: Python 3 and `ffmpeg` on your PATH, then run `./start_kokoro.sh` (sets up its own venv and installs Kokoro TTS on first run — everything else in the app works fine without this)
 
 ## Install
 

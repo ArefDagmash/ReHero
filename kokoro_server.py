@@ -1,24 +1,20 @@
 #!/usr/bin/env python3
-"""Minimal HTTP server wrapping Kokoro TTS. Zero extra deps beyond what's already in the venv.
+"""Minimal HTTP server wrapping Kokoro TTS.
 
 Usage:
-    source ../VoicetoSpeechwithMath/venv/bin/activate
-    python kokoro_server.py
+    ./start_kokoro.sh
 
-Then POST JSON {"text": "..."} to http://localhost:8765/tts → get MP3 audio back.
+That sets up its own venv on first run (see requirements-kokoro.txt) and
+starts the server. Then POST JSON {"text": "..."} to
+http://localhost:8765/tts → get MP3 audio back.
 """
 
 import json
 import io
 import subprocess
-import sys
-import wave
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from pathlib import Path
 
 import numpy as np
-
-VENV_PYTHON = str(Path(__file__).resolve().parent.parent / "VoicetoSpeechwithMath" / "venv" / "bin" / "python")
 
 VOICE = "af_heart"
 SPEED = 1.0
