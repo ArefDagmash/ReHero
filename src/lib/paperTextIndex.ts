@@ -1,14 +1,9 @@
-import * as pdfjsLib from "pdfjs-dist";
-import pdfjsWorker from "pdfjs-dist/build/pdf.worker.mjs?url";
 import type { TextItem } from "pdfjs-dist";
+import { getPdfjs } from "@/lib/pdfjsLoader";
 import { loadPdf } from "@/lib/pdfStorage";
 import { useAppStore } from "@/store/useAppStore";
 import { log } from "@/lib/logger";
 import type { Paper } from "@/types";
-
-// Same worker setup as PdfThumbnail.tsx — reassigning the same value from
-// two modules is harmless, both just need it set before getDocument() runs.
-pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
 
 const DB_NAME = "research-reader-text-index";
 const STORE_NAME = "paper-text";
@@ -63,6 +58,7 @@ async function extractPageTexts(filePath: string): Promise<string[]> {
   const bytes = await loadPdf(filePath.slice(6));
   if (!bytes) return [];
 
+  const pdfjsLib = await getPdfjs();
   const doc = await pdfjsLib.getDocument({ data: bytes }).promise;
   try {
     const pageCount = Math.min(doc.numPages, MAX_INDEXED_PAGES);

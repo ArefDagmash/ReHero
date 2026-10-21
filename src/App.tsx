@@ -1,5 +1,4 @@
-import { useEffect } from "react";
-import Reader from "@/components/Reader";
+import { lazy, Suspense, useEffect, useRef } from "react";
 import HomePage from "@/components/HomePage";
 import ExplorePage from "@/components/ExplorePage";
 import AchievementsPage from "@/components/AchievementsPage";
@@ -7,7 +6,6 @@ import LandingPage from "@/components/LandingPage";
 import SettingsPage from "@/components/SettingsPage";
 import HighlightMenu from "@/components/HighlightMenu";
 import ImageSearchPanel from "@/components/ImageSearchPanel";
-import DrawingPanel from "@/components/DrawingPanel";
 import AiPanel from "@/components/AiPanel";
 import AnnotationPanel from "@/components/AnnotationPanel";
 import SearchPanel from "@/components/SearchPanel";
@@ -15,6 +13,12 @@ import Sidebar from "@/components/Sidebar";
 import XPToast from "@/components/XPToast";
 import { useAppStore } from "@/store/useAppStore";
 import { indexLibraryInBackground } from "@/lib/paperTextIndex";
+
+// Excalidraw pulls in mermaid/katex/cytoscape internally (~2MB) — deferred
+// until first opened so it's not part of the initial bundle/parse cost.
+const DrawingPanel = lazy(() => import("@/components/DrawingPanel"));
+// Reader statically imports pdfjs-dist — deferred until a paper is opened.
+const Reader = lazy(() => import("@/components/Reader"));
 
 type View = "home" | "papers" | "books" | "explore" | "achievements" | "settings" | "reader";
 
@@ -27,6 +31,9 @@ function App() {
   const isEmpty = paperCount === 0 && bookCount === 0;
   const bgTheme = useAppStore((s) => s.bgTheme);
   const fontScale = useAppStore((s) => s.fontScale);
+  const drawingOpen = useAppStore((s) => s.drawingOpen);
+  const hasOpenedDrawingRef = useRef(false);
+  if (drawingOpen) hasOpenedDrawingRef.current = true;
 
   useEffect(() => {
     document.documentElement.dataset.theme = bgTheme;
@@ -86,13 +93,21 @@ function App() {
           {view === "explore" && <ExplorePage />}
           {view === "achievements" && <AchievementsPage />}
           {view === "settings" && <SettingsPage />}
-          {view === "reader" && <Reader />}
+          {view === "reader" && (
+            <Suspense fallback={null}>
+              <Reader />
+            </Suspense>
+          )}
         </div>
       </div>
 
       <HighlightMenu />
       <ImageSearchPanel />
-      <DrawingPanel />
+      {hasOpenedDrawingRef.current && (
+        <Suspense fallback={null}>
+          <DrawingPanel />
+        </Suspense>
+      )}
       <AiPanel />
       <AnnotationPanel />
       <SearchPanel />

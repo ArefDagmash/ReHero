@@ -1,10 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import * as pdfjsLib from "pdfjs-dist";
-import pdfjsWorker from "pdfjs-dist/build/pdf.worker.mjs?url";
+import type { PDFDocumentProxy } from "pdfjs-dist";
 import { FileText } from "lucide-react";
+import { getPdfjs } from "@/lib/pdfjsLoader";
 import { loadPdf } from "@/lib/pdfStorage";
-
-pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
 
 type Props = {
   paperId: string;
@@ -18,7 +16,7 @@ export default function PdfThumbnail({ filePath }: Props) {
 
   useEffect(() => {
     let cancelled = false;
-    const docRef: { current: pdfjsLib.PDFDocumentProxy | null } = { current: null };
+    const docRef: { current: PDFDocumentProxy | null } = { current: null };
 
     async function render() {
       try {
@@ -28,6 +26,7 @@ export default function PdfThumbnail({ filePath }: Props) {
         }
         if (!bytes || cancelled) return;
 
+        const pdfjsLib = await getPdfjs();
         const doc = await pdfjsLib.getDocument({ data: bytes }).promise;
         if (cancelled) { doc.destroy(); return; }
         docRef.current = doc;
